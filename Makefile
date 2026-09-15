@@ -90,10 +90,11 @@ fmt:
 	gofmt -w cmd internal
 	go mod tidy
 
-## lint: vet everything
+## lint: vet the Go, and check the dashboard resolves
 .PHONY: lint
 lint:
 	go vet ./...
+	./deploy/local/check-frontend.sh
 
 # --- Demo controls ----------------------------------------------------------
 #

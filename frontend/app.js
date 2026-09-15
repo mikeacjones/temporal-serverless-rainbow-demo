@@ -119,16 +119,32 @@ function link(state, text) {
 
 /* --- Render ------------------------------------------------------------- */
 
+// render draws one snapshot, panel by panel.
+//
+// Each panel is isolated: a throw in one used to abort the whole function, so
+// a single bad reference silently emptied every panel drawn after it — the
+// version cards, the rail and the fault controls all at once, with nothing on
+// screen saying why. A dashboard being used to make deploy decisions should
+// lose one panel at most, and say so in the console.
 function render(next) {
   snapshot = next;
-  renderReadouts(next);
-  renderSpectrum(next);
-  renderLegend(next);
-  renderRollout(next);
-  renderFleet(next);
-  renderStations(next);
-  renderRail(next);
-  renderFault(next);
+
+  for (const [name, draw] of [
+    ['readouts', renderReadouts],
+    ['routing', renderSpectrum],
+    ['legend', renderLegend],
+    ['deployment', renderRollout],
+    ['fleet', renderFleet],
+    ['versions', renderStations],
+    ['rail', renderRail],
+    ['faults', renderFault],
+  ]) {
+    try {
+      draw(next);
+    } catch (err) {
+      console.error(`panel "${name}" failed to draw`, err);
+    }
+  }
 }
 
 function renderReadouts(s) {
@@ -747,6 +763,26 @@ function updateStationFoot(foot, version, s, routing, health, stuck) {
   if (rescue) {
     rescue.textContent = `Move ${int(health.running || 0)} to ${routing.currentLabel}`;
   }
+}
+
+// dumpControl is the per-version burst control: a count and a button.
+//
+// Its input is why the cards are reconciled rather than rebuilt — recreating
+// this node every second wiped whatever had been typed into it.
+function dumpControl(label) {
+  const row = el('div', { class: 'dump' });
+
+  const count = el('input', { type: 'number', min: '1', max: '20000', step: '50', class: 'dump-count' });
+  count.value = 250;
+  count.setAttribute('aria-label', `Orders to send straight to ${label}`);
+
+  const send = button(`Send to ${label}`, '', () =>
+    act('/api/versions/dump', { version: label, count: Number(count.value) },
+      () => `Sent ${int(count.value)} orders straight to ${label}`));
+  send.title = `Start orders pinned to ${label}, ignoring the routing split`;
+
+  row.append(count, send);
+  return row;
 }
 
 function roleText(version) {
