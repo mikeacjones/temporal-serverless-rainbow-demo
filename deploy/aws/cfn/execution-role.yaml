@@ -1,0 +1,45 @@
+# The IAM role the order worker Lambdas run as.
+#
+# Two permissions only: write their own logs, and read the Temporal API key
+# from Secrets Manager at cold start. The key is deliberately not a plain
+# environment variable, so it is not readable from the Lambda console.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Execution role for the rainbow-serverless order worker Lambdas.
+
+Parameters:
+  RoleName:
+    Type: String
+    Default: rainbow-serverless-worker-execution
+  ApiKeySecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret holding the Temporal Cloud API key.
+
+Resources:
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: Execution role for the rainbow-serverless order worker Lambdas
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: read-temporal-api-key
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                # Scoped to this one secret, not every secret in the account.
+                Resource: !Ref ApiKeySecretArn
+
+Outputs:
+  RoleARN:
+    Description: ARN of the Lambda execution role
+    Value: !GetAtt ExecutionRole.Arn

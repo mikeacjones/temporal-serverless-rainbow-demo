@@ -1,0 +1,228 @@
+# The five order worker versions.
+#
+# All of them run at once, which is what makes a deployment from any version to
+# any other version possible — including backwards. They are identical except
+# for ORDER_VERSION and the Build ID it maps to.
+#
+# If you run the order workers on AWS Lambda instead (see deploy/aws), leave
+# these out and keep only the backend, dashboard and control plane.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-v1
+  labels: { app: order-worker, version: "v1" }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: order-worker, version: "v1" }
+  template:
+    metadata:
+      labels: { app: order-worker, version: "v1" }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Distroless images declare the user by name ("nonroot"), which kubelet
+        # cannot check against runAsNonRoot — it needs a number. 65532 is the
+        # UID behind that name.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: rainbow-worker
+          envFrom:
+            - configMapRef: { name: temporal }
+          env:
+            - name: TEMPORAL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: temporal, key: api-key, optional: true }
+            - { name: ORDER_VERSION, value: "v1" }
+            # Kept equal to the version label so the dashboard can name this
+            # version without any metadata lookup. Change it to an image digest
+            # if a version's code can change under a fixed label.
+            - { name: TEMPORAL_WORKER_BUILD_ID, value: "v1" }
+            - { name: LOG_FORMAT, value: json }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-v2
+  labels: { app: order-worker, version: "v2" }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: order-worker, version: "v2" }
+  template:
+    metadata:
+      labels: { app: order-worker, version: "v2" }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Distroless images declare the user by name ("nonroot"), which kubelet
+        # cannot check against runAsNonRoot — it needs a number. 65532 is the
+        # UID behind that name.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: rainbow-worker
+          envFrom:
+            - configMapRef: { name: temporal }
+          env:
+            - name: TEMPORAL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: temporal, key: api-key, optional: true }
+            - { name: ORDER_VERSION, value: "v2" }
+            # Kept equal to the version label so the dashboard can name this
+            # version without any metadata lookup. Change it to an image digest
+            # if a version's code can change under a fixed label.
+            - { name: TEMPORAL_WORKER_BUILD_ID, value: "v2" }
+            - { name: LOG_FORMAT, value: json }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-v3
+  labels: { app: order-worker, version: "v3" }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: order-worker, version: "v3" }
+  template:
+    metadata:
+      labels: { app: order-worker, version: "v3" }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Distroless images declare the user by name ("nonroot"), which kubelet
+        # cannot check against runAsNonRoot — it needs a number. 65532 is the
+        # UID behind that name.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: rainbow-worker
+          envFrom:
+            - configMapRef: { name: temporal }
+          env:
+            - name: TEMPORAL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: temporal, key: api-key, optional: true }
+            - { name: ORDER_VERSION, value: "v3" }
+            # Kept equal to the version label so the dashboard can name this
+            # version without any metadata lookup. Change it to an image digest
+            # if a version's code can change under a fixed label.
+            - { name: TEMPORAL_WORKER_BUILD_ID, value: "v3" }
+            - { name: LOG_FORMAT, value: json }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-v4
+  labels: { app: order-worker, version: "v4" }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: order-worker, version: "v4" }
+  template:
+    metadata:
+      labels: { app: order-worker, version: "v4" }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Distroless images declare the user by name ("nonroot"), which kubelet
+        # cannot check against runAsNonRoot — it needs a number. 65532 is the
+        # UID behind that name.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: rainbow-worker
+          envFrom:
+            - configMapRef: { name: temporal }
+          env:
+            - name: TEMPORAL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: temporal, key: api-key, optional: true }
+            - { name: ORDER_VERSION, value: "v4" }
+            # Kept equal to the version label so the dashboard can name this
+            # version without any metadata lookup. Change it to an image digest
+            # if a version's code can change under a fixed label.
+            - { name: TEMPORAL_WORKER_BUILD_ID, value: "v4" }
+            - { name: LOG_FORMAT, value: json }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-v5
+  labels: { app: order-worker, version: "v5" }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: order-worker, version: "v5" }
+  template:
+    metadata:
+      labels: { app: order-worker, version: "v5" }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Distroless images declare the user by name ("nonroot"), which kubelet
+        # cannot check against runAsNonRoot — it needs a number. 65532 is the
+        # UID behind that name.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: rainbow-worker
+          envFrom:
+            - configMapRef: { name: temporal }
+          env:
+            - name: TEMPORAL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: temporal, key: api-key, optional: true }
+            - { name: ORDER_VERSION, value: "v5" }
+            # Kept equal to the version label so the dashboard can name this
+            # version without any metadata lookup. Change it to an image digest
+            # if a version's code can change under a fixed label.
+            - { name: TEMPORAL_WORKER_BUILD_ID, value: "v5" }
+            - { name: LOG_FORMAT, value: json }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }

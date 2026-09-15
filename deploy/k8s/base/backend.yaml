@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels: { app: backend }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: backend }
+  template:
+    metadata:
+      labels: { app: backend }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Distroless images declare the user by name ("nonroot"), which kubelet
+        # cannot check against runAsNonRoot — it needs a number. 65532 is the
+        # UID behind that name.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: backend
+          image: rainbow-backend
+          ports:
+            - { name: http, containerPort: 8080 }
+          envFrom:
+            - configMapRef: { name: temporal }
+          env:
+            - name: TEMPORAL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: temporal, key: api-key, optional: true }
+            - { name: LOG_FORMAT, value: json }
+            # The sync match rate comes from the Temporal server, not the
+            # task-queue API. On Cloud that means the OpenMetrics endpoint and
+            # a Metrics-Read-Only key; both optional, and the gauge simply
+            # reports itself unavailable without them.
+            - name: TEMPORAL_METRICS_API_KEY
+              valueFrom:
+                secretKeyRef: { name: temporal-metrics, key: api-key, optional: true }
+          # The backend holds no state of its own — it reads Temporal on a
+          # timer — so it restarts freely and scales horizontally.
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector: { app: backend }
+  ports:
+    - { name: http, port: 8080, targetPort: http }

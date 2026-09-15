@@ -1,0 +1,34 @@
+# Exposure on the sa-demo cluster: cert-manager issues the certificate and
+# Traefik routes the hostname to the dashboard.
+#
+# *.tmprl-demo.cloud already resolves to this cluster's load balancer, so no
+# DNS record is needed for a new subdomain.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: rainbow-serverless-tls
+spec:
+  secretName: rainbow-serverless-tls
+  dnsNames:
+    - rainbow-serverless.tmprl-demo.cloud
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: rainbow-serverless
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`rainbow-serverless.tmprl-demo.cloud`)
+      services:
+        # The dashboard's own nginx proxies /api and /events to the backend,
+        # so everything enters through one service and one origin.
+        - name: dashboard
+          port: 80
+  tls:
+    secretName: rainbow-serverless-tls

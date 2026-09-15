@@ -1,0 +1,19 @@
+# The always-on part of the demo: the dashboard, its backend, and the control
+# plane that runs rollouts and generates traffic.
+#
+# The order workers are deliberately NOT here. They are either serverless
+# (AWS Lambda — see deploy/aws and the sa-demo overlay) or, if you want them
+# in-cluster, added with the ../workers component.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - backend.yaml
+  - dashboard.yaml
+  - control.yaml
+
+images:
+  - name: rainbow-backend
+  - name: rainbow-dashboard
+  - name: rainbow-control

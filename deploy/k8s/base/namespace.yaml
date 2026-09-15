@@ -1,0 +1,6 @@
+# Created by the overlay's `namespace:` setting, which also rewrites every
+# resource into it. Named here so `kubectl apply -k` can create it in one pass.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rainbow-serverless

@@ -1,0 +1,73 @@
+# The IAM role Temporal Cloud assumes in order to invoke the worker Lambdas.
+#
+# This is what makes the workers serverless: Temporal watches the task queue
+# and calls Lambda itself, so there is no always-on worker and nothing to
+# scale. Temporal calls the Lambda API from outside — it never connects into
+# the account's network, so no inbound ports are involved.
+#
+# The trust policy is scoped by an External ID to prevent a confused-deputy
+# attack: another Temporal Cloud tenant cannot assume this role without it.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Role Temporal Cloud assumes to invoke the rainbow-serverless worker Lambdas.
+
+Parameters:
+  RoleName:
+    Type: String
+    Default: rainbow-serverless-temporal-invoke
+  AssumeRoleExternalId:
+    Type: String
+    Description: Shared secret echoed back when creating each Worker Deployment Version.
+    AllowedPattern: '[a-zA-Z0-9_+=,.@-]*'
+    MinLength: 5
+    MaxLength: 45
+  LambdaFunctionARNs:
+    Type: CommaDelimitedList
+    Description: >-
+      Lambda function ARNs Temporal may invoke. A wildcard suffix covers every
+      published version of a function, e.g. function:rainbow-orders-v1:*
+
+Resources:
+  TemporalInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: Role Temporal Cloud uses to invoke Serverless Worker Lambdas
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              # Temporal Cloud's Worker Controller Instance roles, one per
+              # cell. Published by Temporal; all five are required.
+              AWS:
+                - arn:aws:iam::902542641901:role/wci-lambda-invoke
+                - arn:aws:iam::160190466495:role/wci-lambda-invoke
+                - arn:aws:iam::819232936619:role/wci-lambda-invoke
+                - arn:aws:iam::829909441867:role/wci-lambda-invoke
+                - arn:aws:iam::354116250941:role/wci-lambda-invoke
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'sts:ExternalId': [!Ref AssumeRoleExternalId]
+
+  InvokePermissions:
+    Type: AWS::IAM::Policy
+    DependsOn: TemporalInvokeRole
+    Properties:
+      PolicyName: rainbow-serverless-lambda-invoke
+      Roles:
+        - !Ref RoleName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+              - lambda:GetFunction
+            Resource: !Ref LambdaFunctionARNs
+
+Outputs:
+  RoleARN:
+    Description: ARN of the role Temporal Cloud assumes
+    Value: !GetAtt TemporalInvokeRole.Arn

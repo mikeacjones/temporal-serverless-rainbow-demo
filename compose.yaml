@@ -1,0 +1,127 @@
+# The whole demo, containerised: Temporal, five versioned order workers, the
+# control plane, the backend API and the dashboard.
+#
+#   docker compose up --build        start everything
+#   docker compose down -v           tear it down
+#
+# Dashboard   http://localhost:3000
+# Temporal UI http://localhost:8233
+
+name: rainbow
+
+# Shared Temporal connection settings. Every service joins the same namespace
+# and the same Worker Deployment.
+x-temporal-env: &temporal-env
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_DEPLOYMENT_NAME: rainbow-orders
+  LOG_FORMAT: text
+
+# Every order worker is the same image with a different version baked into its
+# environment. All five run at once, which is what makes a deployment from any
+# version to any other version possible.
+x-order-worker: &order-worker
+  build:
+    context: .
+    dockerfile: deploy/docker/Dockerfile.worker
+  depends_on:
+    temporal:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+
+  temporal:
+    image: temporalio/temporal:latest
+    command:
+      - server
+      - start-dev
+      - --ip=0.0.0.0
+      # The order Workflow publishes these about itself so the dashboard can
+      # read thousands of orders in bulk rather than querying each one.
+      - --search-attribute=OrderVersion=Keyword
+      - --search-attribute=OrderStep=Keyword
+      - --search-attribute=OrderHealth=Keyword
+      - --log-level=error
+      # Sync match rate is a real server metric, not something the task-queue
+      # API reports, so the server has to expose its Prometheus endpoint for
+      # the backend to read it.
+      - --metrics-port=9233
+    ports:
+      - "7233:7233"   # gRPC, for the Temporal CLI
+      - "8233:8233"   # Temporal Web UI
+      - "9233:9233"   # Prometheus metrics
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # --- The five order worker versions -------------------------------------
+
+  order-v1:
+    <<: *order-worker
+    environment: { <<: *temporal-env, ORDER_VERSION: v1, ORDER_PROFILE: demo }
+
+  order-v2:
+    <<: *order-worker
+    environment: { <<: *temporal-env, ORDER_VERSION: v2, ORDER_PROFILE: demo }
+
+  order-v3:
+    <<: *order-worker
+    environment: { <<: *temporal-env, ORDER_VERSION: v3, ORDER_PROFILE: demo }
+
+  order-v4:
+    <<: *order-worker
+    environment: { <<: *temporal-env, ORDER_VERSION: v4, ORDER_PROFILE: demo }
+
+  order-v5:
+    <<: *order-worker
+    environment: { <<: *temporal-env, ORDER_VERSION: v5, ORDER_PROFILE: demo }
+
+  # --- Control plane -------------------------------------------------------
+
+  # Deliberately unversioned: the Workflow that changes which version takes
+  # traffic must not be pinned to one of those versions.
+  control:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.controlworker
+    environment: *temporal-env
+    depends_on:
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- Backend and dashboard ----------------------------------------------
+
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.backend
+    environment:
+      <<: *temporal-env
+      PORT: "8080"
+      POLL_INTERVAL: 1s
+      # Where to read server metrics for the sync match rate. Unset simply
+      # hides that one gauge.
+      TEMPORAL_METRICS_URL: http://temporal:9233/metrics
+    ports:
+      # Exposed so the API can be driven with curl during a demo; the
+      # dashboard reaches it over the internal network.
+      - "8088:8080"
+    depends_on:
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.frontend
+    ports:
+      - "3000:8080"
+    depends_on:
+      - backend
+    restart: unless-stopped

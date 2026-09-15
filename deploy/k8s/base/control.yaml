@@ -1,0 +1,42 @@
+# The control plane: the rollout coordinator and the traffic generator.
+#
+# Unversioned on purpose — a Workflow that changes which version takes traffic
+# must not be pinned to one of those versions.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control
+  labels: { app: control }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: control }
+  template:
+    metadata:
+      labels: { app: control }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Distroless images declare the user by name ("nonroot"), which kubelet
+        # cannot check against runAsNonRoot — it needs a number. 65532 is the
+        # UID behind that name.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: control
+          image: rainbow-control
+          envFrom:
+            - configMapRef: { name: temporal }
+          env:
+            - name: TEMPORAL_API_KEY
+              valueFrom:
+                secretKeyRef: { name: temporal, key: api-key, optional: true }
+            - { name: LOG_FORMAT, value: json }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }

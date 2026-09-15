@@ -1,0 +1,14 @@
+# Optional: run the five order worker versions as in-cluster Deployments
+# instead of on AWS Lambda.
+#
+# Include this only when you are *not* using serverless workers. Running both
+# would put two sets of pollers on the same versions, and the demo's whole
+# point is that nothing is running until there is work.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - workers.yaml
+
+images:
+  - name: rainbow-worker

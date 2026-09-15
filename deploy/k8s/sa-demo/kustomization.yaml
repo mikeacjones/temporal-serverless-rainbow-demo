@@ -1,0 +1,44 @@
+# The sa-demo deployment: purely serverless.
+#
+# The order workers run on AWS Lambda, invoked by Temporal Cloud, so nothing in
+# this cluster polls the orders task queue. What is here is only the dashboard,
+# its backend, and the control plane.
+#
+# Prerequisites, in order:
+#   1. deploy/aws/deploy.sh          the five worker Lambdas
+#   2. the invoke role + worker deployment versions (see README)
+#   3. the api-key Secret below
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: rainbow-serverless
+
+resources:
+  - ../base
+  - ingress.yaml
+
+images:
+  - name: rainbow-backend
+    newName: 429214323166.dkr.ecr.us-west-1.amazonaws.com/tmprl-dem-cld/rainbow-serverless/backend
+    newTag: latest
+  - name: rainbow-dashboard
+    newName: 429214323166.dkr.ecr.us-west-1.amazonaws.com/tmprl-dem-cld/rainbow-serverless/dashboard
+    newTag: latest
+  - name: rainbow-control
+    newName: 429214323166.dkr.ecr.us-west-1.amazonaws.com/tmprl-dem-cld/rainbow-serverless/control
+    newTag: latest
+
+# The API key is NOT in git. Create it once:
+#   kubectl -n rainbow-serverless create secret generic temporal \
+#     --from-literal=api-key=<key>
+configMapGenerator:
+  - name: temporal
+    literals:
+      - TEMPORAL_ADDRESS=michaelj-rainbow-serverless.a2dd6.tmprl.cloud:7233
+      - TEMPORAL_NAMESPACE=michaelj-rainbow-serverless.a2dd6
+      - TEMPORAL_DEPLOYMENT_NAME=rainbow-orders
+      # Temporal Cloud's OpenMetrics endpoint, which is where the real sync
+      # match rate lives. Needs the temporal-metrics Secret:
+      #   kubectl -n rainbow-serverless create secret generic temporal-metrics \
+      #     --from-literal=api-key=<metrics-read-only key>
+      - TEMPORAL_METRICS_URL=https://metrics.temporal.io/v1/metrics
