@@ -492,6 +492,11 @@ select { width: 100%; }
 }
 .ticket-stuck { border-color: color-mix(in srgb, var(--trouble) 40%, transparent); border-left-color: var(--trouble); }
 
+/* Started, but no worker has picked it up yet, so it has not reported which
+ * version it is on. Muted rather than alarming: it is queued, not broken. */
+.ticket[data-shown-version=""] .ticket-version,
+.ticket[data-shown-version=""] .ticket-step { color: var(--ink-faint); }
+
 /* An empty slot holds its place so nothing shifts when an order finishes. */
 .ticket-slot {
   border: 1px dashed var(--hairline);

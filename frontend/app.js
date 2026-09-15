@@ -967,7 +967,7 @@ function ticket(order, pipelines) {
   const top = el('div', { class: 'ticket-top' });
   top.append(
     el('span', { class: 'ticket-id', text: order.orderId.replace(/^ord-0*/, '#') }),
-    el('span', { class: 'ticket-version', text: order.version || '?' }),
+    el('span', { class: 'ticket-version', text: order.version || '…' }),
   );
   node.append(
     top,
@@ -988,7 +988,21 @@ function updateTicket(node, order, pipelines) {
   const done = order.status === 'Completed';
   node.className = 'ticket' + (order.degraded ? ' ticket-stuck' : '') + (done ? ' ticket-done' : '');
 
-  const [, steps, step, ageLine] = node.children;
+  const [top, steps, step, ageLine] = node.children;
+
+  // The version has to be refreshed, not just set at creation.
+  //
+  // An order that has been started but whose first Workflow Task has not run
+  // yet has no version: the Workflow publishes that about itself on its first
+  // task, so for a moment visibility reports it as Running with no version and
+  // no step. A ticket seated in that window used to keep its placeholder and
+  // its grey forever, because only the step dots were being updated.
+  const shown = order.version || '';
+  if (node.dataset.shownVersion !== shown) {
+    node.dataset.shownVersion = shown;
+    top.children[1].textContent = shown || '…';
+    node.style.setProperty('--version-color', colorFor(order.version));
+  }
 
   const reached = done ? 'done' : String(order.step);
   if (steps.dataset.at !== reached) {
@@ -996,7 +1010,10 @@ function updateTicket(node, order, pipelines) {
     steps.replaceChildren(...stepDots(order, pipelines, done));
   }
 
-  step.textContent = order.degraded ? 'stuck: ' + order.step : order.step || '—';
+  // No step yet means the order is queued and no worker has taken it — which
+  // is worth saying, rather than showing a dash.
+  step.textContent = order.degraded ? 'stuck: ' + order.step
+    : order.step || 'waiting for a worker';
   ageLine.textContent = done ? 'served in ' + age(order.elapsedSec) : age(order.elapsedSec);
   return node;
 }
