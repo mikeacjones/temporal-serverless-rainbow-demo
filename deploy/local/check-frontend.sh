@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Check the dashboard for the mistakes `node --check` cannot see.
 #
-# node --check validates syntax only. It happily accepts a call to a function
-# that does not exist, which is exactly what broke the version cards, the order
-# rail and the fault controls in one go — a refactor deleted a function that was
-# still being called, and the resulting ReferenceError emptied every panel drawn
-# after it.
+# node --check validates syntax only. It accepts a call to a function that does
+# not exist and a read of a variable that was never declared — and both of those
+# shipped, from edits that replaced a span of the file and silently swallowed
+# declarations living inside it. Each one emptied a panel at runtime.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -16,60 +15,71 @@ echo "syntax OK"
 python3 - <<'PY'
 import re, sys
 
-js = open('frontend/app.js').read()
+raw = open('frontend/app.js').read()
 html = open('frontend/index.html').read()
+
+# Work on a copy with comments and string bodies removed, so words inside
+# prose and messages are not mistaken for code.
+# Order matters. Strings come out before line comments, or a URL inside a
+# string ("http://…") has its own tail eaten as a comment, leaving a dangling
+# quote that breaks every strip after it. Regex literals come out too, or the
+# words inside them read as identifiers.
+code = re.sub(r'/\*.*?\*/', ' ', raw, flags=re.S)
+code = re.sub(r'`(?:[^`\\]|\\.)*`', '``', code)
+code = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", code)
+code = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', code)
+code = re.sub(r'(?<=[(,=:\[])\s*/(?:[^/\n\\]|\\.)+/[gimsuy]*', ' //re ', code)
+code = re.sub(r'//[^\n]*', ' ', code)
+
+# Object literal keys are not variable reads.
+keys = re.sub(r'(?<=[{,])\s*([A-Za-z_$][\w$]*)\s*:', ' ', code)
+
+declared = set()
+declared |= set(re.findall(r'function\s+([A-Za-z_$][\w$]*)', code))
+declared |= set(re.findall(r'(?:const|let|var)\s+([A-Za-z_$][\w$]*)', code))
+for names in re.findall(r'(?:const|let|var)\s*[\[{]([^\]}]*)[\]}]', code):
+    declared |= {n.strip().split(':')[-1].strip() for n in names.split(',') if n.strip()}
+for plist in re.findall(r'function\s*[A-Za-z_$\w]*\s*\(([^)]*)\)', code):
+    declared |= {p.strip().split('=')[0].strip() for p in plist.split(',') if p.strip()}
+for plist in re.findall(r'\(([^()]*)\)\s*=>', code):
+    declared |= {p.strip().split('=')[0].strip() for p in plist.split(',') if p.strip()}
+declared |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*=>', code))
+declared |= set(re.findall(r'for\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)', code))
+declared |= set(re.findall(r'catch\s*\(\s*([A-Za-z_$][\w$]*)', code))
+declared = {d for d in declared if re.fullmatch(r'[A-Za-z_$][\w$]*', d or '')}
+
+keywords = {
+    'if','else','for','while','do','switch','case','default','break','continue','return',
+    'function','const','let','var','new','typeof','instanceof','in','of','delete','void',
+    'try','catch','finally','throw','class','extends','super','this','async','await','yield',
+    'true','false','null','undefined','NaN','Infinity','arguments','static','get','set',
+}
+browser = {
+    'window','document','console','fetch','EventSource','URLSearchParams','location','navigator',
+    'setTimeout','clearTimeout','setInterval','clearInterval','requestAnimationFrame',
+    'JSON','Math','Number','String','Object','Array','Set','Map','Date','Boolean','Promise',
+    'isNaN','parseInt','parseFloat','Error','RegExp','Symbol','BigInt',
+}
+
+# Identifiers actually read, excluding property access and object keys.
+used = set(re.findall(r'(?<![.\w$])([A-Za-z_$][\w$]*)', keys))
 
 failures = []
 
-# 1. Every function called must be defined, or be a parameter holding one.
-defined = set(re.findall(r'function\s+([A-Za-z_$][\w$]*)\s*\(', js))
-defined |= set(re.findall(r'const\s+([A-Za-z_$][\w$]*)\s*=\s*\(', js))
+undeclared = sorted(used - declared - keywords - browser)
+if undeclared:
+    failures.append(f'identifiers used but never declared: {undeclared}')
 
-# Parameters count as defined: a predicate or callback passed in is called by
-# name, and is not something this file declares.
-params = set()
-for plist in re.findall(r'function\s*[A-Za-z_$\w]*\s*\(([^)]*)\)', js):
-    params |= {p.strip().split('=')[0].strip() for p in plist.split(',') if p.strip()}
-for plist in re.findall(r'\(([^()]*)\)\s*=>', js):
-    params |= {p.strip().split('=')[0].strip() for p in plist.split(',') if p.strip()}
-params |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*=>', js))
-
-# Destructured bindings count too, e.g. `for (const [name, draw] of ...)`
-# binds draw to a function that is then called by name.
-for names in re.findall(r'(?:const|let|var)\s*\[([^\]]*)\]', js):
-    params |= {n.strip() for n in names.split(',') if n.strip()}
-defined |= {p for p in params if re.fullmatch(r'[A-Za-z_$][\w$]*', p or '')}
-
-# A leading dot means a method call on something else, which is not this
-# file's business — except that the spread operator looks identical to the
-# regex. `...stepDots(x)` is a plain call, so spreads are removed first;
-# without this, every call made inside a spread went unchecked.
-calls_src = js.replace('...', ' ')
-called = set(re.findall(r'(?<![.\w$])([a-z_$][\w$]*)\s*\(', calls_src))
-
-builtins = {
-    'if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'typeof', 'new', 'await',
-    'else', 'do', 'try', 'throw', 'void', 'isNaN',
-    'Number', 'String', 'Math', 'Set', 'Map', 'Date', 'Boolean', 'JSON', 'Array', 'Object',
-    'fetch', 'setTimeout', 'parseInt', 'parseFloat', 'console', 'document',
-}
-# CSS function names that appear inside style strings, not calls.
-css = {'mix', 'translateX', 'var'}
-
-undefined = sorted(called - defined - builtins - css)
-if undefined:
-    failures.append(f'calls to undefined functions: {undefined}')
-
-# 2. Every element the renderer reaches for must exist in the markup.
-ids = set(re.findall(r"\$\('([^']+)'\)", js))
+# Every element the renderer reaches for must exist in the markup.
+ids = set(re.findall(r"\$\('([^']+)'\)", raw))
 present = set(re.findall(r'id="([^"]+)"', html))
 missing = sorted(ids - present)
 if missing:
     failures.append(f'element ids referenced but not in the markup: {missing}')
 
-# 3. Every endpoint the UI posts to must be routed by the backend.
+# Every endpoint the UI posts to must be routed by the backend.
 routes = set(re.findall(r'"(?:GET|POST) (/api/[^"]+)"', open('internal/api/server.go').read()))
-calls = sorted(set(re.findall(r"act\('(/api/[^']+)'", js)))
+calls = sorted(set(re.findall(r"act\('(/api/[^']+)'", raw)))
 unrouted = [c for c in calls if c not in routes]
 if unrouted:
     failures.append(f'endpoints called but not routed: {unrouted}')
@@ -79,5 +89,5 @@ if failures:
         print('FAIL:', f, file=sys.stderr)
     sys.exit(1)
 
-print(f'{len(defined)} functions, {len(ids)} element ids, {len(calls)} endpoints — all resolve')
+print(f'{len(declared)} names, {len(ids)} element ids, {len(calls)} endpoints — all resolve')
 PY

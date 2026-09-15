@@ -837,6 +837,35 @@ function renderRail(s) {
   );
 }
 
+// leaveMs is how long a finished order takes to fade out. Must match the
+// .ticket-leaving animation, or the node is removed mid-fade.
+const leaveMs = 550;
+
+// The rail seats each order in a slot it keeps for its whole life.
+//
+// Ordering by age did not work: elapsedSec is whole seconds, so dozens of
+// orders tie, and among ties the sort falls back to the order the backend
+// listed them in — which churns as the window slides. Tickets shuffled every
+// second even though the sort was doing what it was asked.
+//
+// Slots remove ordering from the equation. An order is seated once, stays in
+// that position until it finishes, fades in place, and only then frees the
+// slot for the next arrival. Nothing else moves.
+const slots = [];              // slot index -> order ID, or null when free
+const seatedNodes = new Map(); // order ID -> its element
+
+// retired holds orders that have finished and faded out.
+//
+// The backend keeps returning a completed order until it ages out of the
+// sampled window, so without this the ticket would be reseated on the very
+// next frame after fading away.
+const retired = new Set();
+
+// drawnOnce guards the first frame. The window already contains orders that
+// finished before the page opened, and animating a screenful of them fading
+// at once is just noise — they are retired silently instead.
+let drawnOnce = false;
+
 // drawTickets seats arrivals, updates what is seated, and clears what has gone.
 //
 // Returns how many tickets are on screen.
