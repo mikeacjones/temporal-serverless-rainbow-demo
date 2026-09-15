@@ -13,12 +13,17 @@ import (
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/traffic"
 )
 
-// liveOrderSample is how many recent orders the live strip shows.
+// liveOrderSample is how many recent orders the live rail shows.
 //
-// A sample, not the whole population: the strip is there to show the texture of
-// traffic and which version is handling it, and no one can read more than this
-// anyway.
-const liveOrderSample = 40
+// A sample, not the whole population: the rail is there to show the texture of
+// traffic and which version is handling it.
+//
+// Sized so an order survives its whole life inside the window. The rail is
+// ordered oldest-first so one order can be followed until it completes, and
+// visibility returns the newest N — so if N is too small for the order rate,
+// an order drops out of the window before finishing and appears to vanish
+// halfway through its journey.
+const liveOrderSample = 60
 
 // historyLength is how many samples the sparklines keep — at a one-second
 // poll, about two minutes of history.

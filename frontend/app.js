@@ -691,18 +691,25 @@ const RAIL_FILTERS = {
 };
 
 function renderRail(s) {
-  const all = s.orders || [];
+  // Oldest first, and held in that order.
+  //
+  // Visibility hands these back newest-first, which meant every ticket moved
+  // every second and you could not follow one order. Sorted by age the rail
+  // becomes a conveyor: an order joins at the end, rises as the ones ahead of
+  // it complete and drop off, and finally leaves from the front — so a single
+  // order can be watched filling its steps until it disappears.
+  const all = (s.orders || []).slice().sort((a, b) => b.elapsedSec - a.elapsedSec);
   const orders = all.filter(RAIL_FILTERS[railFilter] || RAIL_FILTERS.all);
 
   $('tickets-count').textContent = all.length
-    ? `${orders.length} of ${all.length} sampled · ${int(s.totals.running)} in flight`
+    ? `${orders.length} of ${all.length} sampled · oldest first · ${int(s.totals.running)} in flight`
     : '';
 
   for (const chip of document.querySelectorAll('.chip[data-filter]')) {
     chip.setAttribute('aria-pressed', String(chip.dataset.filter === railFilter));
   }
 
-  $('tickets').replaceChildren(...orders.map((order) => ticket(order, s.pipelines || {})));
+  drawTickets(orders, s.pipelines || {});
 
   const stuck = s.totals.degraded || 0;
   $('rail-foot').replaceChildren(
@@ -715,11 +722,28 @@ function renderRail(s) {
   );
 }
 
+// drawTickets reconciles the rail by order ID rather than rebuilding it.
+//
+// Rebuilding every second destroyed and recreated every ticket, which restarts
+// the step-dot animation and throws away the DOM identity that makes an
+// individual order followable. Reusing the node keeps both: passing existing
+// nodes to replaceChildren *moves* them instead of recreating them, so a
+// ticket that survives a tick keeps its element, its position logic and its
+// running animation.
+function drawTickets(orders, pipelines) {
+  const container = $('tickets');
+  const existing = new Map();
+  for (const node of container.children) existing.set(node.dataset.orderId, node);
+
+  container.replaceChildren(...orders.map((order) => {
+    const node = existing.get(order.orderId);
+    return node ? updateTicket(node, order, pipelines) : ticket(order, pipelines);
+  }));
+}
+
 function ticket(order, pipelines) {
-  const done = order.status === 'Completed';
-  const node = el('div', {
-    class: 'ticket' + (order.degraded ? ' ticket-stuck' : '') + (done ? ' ticket-done' : ''),
-  });
+  const node = el('div', { class: 'ticket' });
+  node.dataset.orderId = order.orderId;
   node.style.setProperty('--version-color', colorFor(order.version));
 
   const top = el('div', { class: 'ticket-top' });
@@ -727,12 +751,35 @@ function ticket(order, pipelines) {
     el('span', { class: 'ticket-id', text: order.orderId.replace(/^ord-0*/, '#') }),
     el('span', { class: 'ticket-version', text: order.version || '?' }),
   );
-  node.append(top, stepDots(order, pipelines, done));
-
   node.append(
-    el('div', { class: 'ticket-step', text: order.degraded ? 'stuck: ' + order.step : order.step || '—' }),
-    el('div', { class: 'ticket-age', text: done ? 'served in ' + age(order.elapsedSec) : age(order.elapsedSec) }),
+    top,
+    el('div', { class: 'ticket-steps' }),
+    el('div', { class: 'ticket-step' }),
+    el('div', { class: 'ticket-age' }),
   );
+
+  return updateTicket(node, order, pipelines);
+}
+
+// updateTicket writes an order's current state into an existing ticket.
+//
+// Only the step dots are rebuilt, and only when the order has actually moved:
+// redrawing them every tick would restart the pulse on the live dot, which is
+// the one thing that shows the order is alive.
+function updateTicket(node, order, pipelines) {
+  const done = order.status === 'Completed';
+  node.className = 'ticket' + (order.degraded ? ' ticket-stuck' : '') + (done ? ' ticket-done' : '');
+
+  const [, steps, step, ageLine] = node.children;
+
+  const reached = done ? 'done' : String(order.step);
+  if (steps.dataset.at !== reached) {
+    steps.dataset.at = reached;
+    steps.replaceChildren(...stepDots(order, pipelines, done));
+  }
+
+  step.textContent = order.degraded ? 'stuck: ' + order.step : order.step || '—';
+  ageLine.textContent = done ? 'served in ' + age(order.elapsedSec) : age(order.elapsedSec);
   return node;
 }
 
@@ -744,23 +791,23 @@ function ticket(order, pipelines) {
 // difference between versions, on every single order.
 function stepDots(order, pipelines, done) {
   const steps = pipelines[order.version] || [];
-  const row = el('div', { class: 'ticket-steps' });
-  if (!steps.length) return row;
+  if (!steps.length) return [];
 
   const at = done ? steps.length : Math.max(0, steps.indexOf(order.step));
 
+  const nodes = [];
   steps.forEach((step, i) => {
     if (i > 0) {
-      row.append(el('span', { class: 'step-link' + (i <= at ? ' step-link-done' : '') }));
+      nodes.push(el('span', { class: 'step-link' + (i <= at ? ' step-link-done' : '') }));
     }
     let cls = 'step-dot';
     if (i < at || done) cls += ' step-dot-done';
     else if (i === at) cls += ' step-dot-live';
     const dot = el('span', { class: cls });
     dot.title = step;
-    row.append(dot);
+    nodes.push(dot);
   });
-  return row;
+  return nodes;
 }
 
 // renderFault keeps the fault selects in step with the versions that actually
