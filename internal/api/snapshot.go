@@ -13,7 +13,8 @@ import (
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/traffic"
 )
 
-// liveOrderSample is how many recent orders the live rail shows.
+// defaultLiveOrderSample is how many live orders the rail seats when
+// LIVE_ORDER_SAMPLE is not set.
 //
 // A sample, not the whole population: the rail is there to show the texture of
 // traffic and which version is handling it.
@@ -23,7 +24,7 @@ import (
 // visibility returns the newest N — so if N is too small for the order rate,
 // an order drops out of the window before finishing and appears to vanish
 // halfway through its journey.
-const liveOrderSample = 60
+const defaultLiveOrderSample = 150
 
 // historyLength is how many samples the sparklines keep — at a one-second
 // poll, about two minutes of history.
@@ -230,7 +231,7 @@ func (s *Server) build(ctx context.Context) *Snapshot {
 	})
 
 	run(func() {
-		live, err := s.reader.RecentOrders(ctx, liveOrderSample)
+		live, err := s.reader.RecentOrders(ctx, s.orderSample)
 		if err != nil {
 			s.logger.Debug("recent orders failed", "err", err)
 			if previous != nil {

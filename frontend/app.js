@@ -811,26 +811,19 @@ const RAIL_FILTERS = {
 };
 
 function renderRail(s) {
-  // Oldest first, and held in that order.
-  //
-  // Visibility hands these back newest-first, which meant every ticket moved
-  // every second and you could not follow one order. Sorted by age the rail
-  // becomes a conveyor: an order joins at the end, rises as the ones ahead of
-  // it complete and drop off, and finally leaves from the front — so a single
-  // order can be watched filling its steps until it disappears.
-  const all = (s.orders || []).slice().sort((a, b) => b.elapsedSec - a.elapsedSec);
-  const orders = all.filter(RAIL_FILTERS[railFilter] || RAIL_FILTERS.all);
+  const all = s.orders || [];
+  const filter = RAIL_FILTERS[railFilter] || RAIL_FILTERS.all;
 
   for (const chip of document.querySelectorAll('.chip[data-filter]')) {
     chip.setAttribute('aria-pressed', String(chip.dataset.filter === railFilter));
   }
 
-  // The count comes back from the draw, because finished orders are retired
-  // during it — counting before would claim more tickets than are on screen.
-  const shown = drawTickets(orders, s.pipelines || {});
+  // The count comes back from the draw: seating, retiring and filtering all
+  // happen there, so counting beforehand would claim more than is on screen.
+  const shown = drawTickets(all, s.pipelines || {}, filter);
 
   $('tickets-count').textContent = all.length
-    ? `${shown} on the rail · oldest first · ${int(s.totals.running)} in flight`
+    ? `${shown} on the rail · ${int(s.totals.running)} in flight`
     : '';
 
   const stuck = s.totals.degraded || 0;
@@ -844,71 +837,97 @@ function renderRail(s) {
   );
 }
 
-// leaveMs is how long a finished order takes to fade out. Must match the
-// .ticket-leaving animation, or the node is removed mid-fade.
-const leaveMs = 550;
-
-// retired holds orders that have finished and faded out.
+// drawTickets seats arrivals, updates what is seated, and clears what has gone.
 //
-// The backend keeps returning a completed order until it ages out of the
-// sampled window, so without this the ticket would be recreated on the very
-// next frame after fading away.
-const retired = new Set();
-
-// drawnOnce guards the first frame. The window already contains orders that
-// finished before the page opened, and animating a screenful of them fading
-// at once is just noise — they are retired silently instead.
-let drawnOnce = false;
-
-// drawTickets reconciles the rail by order ID rather than rebuilding it.
-//
-// Rebuilding every second destroyed and recreated every ticket, which restarts
-// the step-dot animation and throws away the DOM identity that makes an
-// individual order followable. Reusing the node keeps both: passing existing
-// nodes to replaceChildren *moves* them instead of recreating them, so a
-// ticket that survives a tick keeps its element and its running animation.
-function drawTickets(orders, pipelines) {
+// Returns how many tickets are on screen.
+function drawTickets(orders, pipelines, filter) {
   const container = $('tickets');
-  const existing = new Map();
-  for (const node of container.children) existing.set(node.dataset.orderId, node);
+  const byId = new Map(orders.map((o) => [o.orderId, o]));
 
-  // Forget orders that have left the window, so the set cannot grow unbounded.
-  const present = new Set(orders.map((o) => o.orderId));
-  for (const id of retired) {
-    if (!present.has(id)) retired.delete(id);
+  // Orders that finished before this page opened never appear.
+  if (!drawnOnce) {
+    for (const order of orders) {
+      if (order.status === 'Completed') retired.add(order.orderId);
+    }
   }
 
-  const nodes = [];
-  for (const order of orders) {
-    if (retired.has(order.orderId)) continue;
+  // Free any slot whose order has left the window or finished fading.
+  for (let i = 0; i < slots.length; i += 1) {
+    const id = slots[i];
+    if (!id) continue;
+    if (!byId.has(id) || retired.has(id)) {
+      const node = seatedNodes.get(id);
+      if (node) node.remove();
+      seatedNodes.delete(id);
+      slots[i] = null;
+    }
+  }
 
-    // Orders that finished before this page opened never appear.
-    if (!drawnOnce && order.status === 'Completed') {
-      retired.add(order.orderId);
+  // Seat arrivals in order ID, which is monotonic with start time and — unlike
+  // age — never changes for a given order. Lowest free slot first, so the rail
+  // fills its gaps rather than growing.
+  const seated = new Set(slots.filter(Boolean));
+  const arrivals = orders
+    .filter((o) => !seated.has(o.orderId) && !retired.has(o.orderId))
+    .sort((a, b) => (a.orderId < b.orderId ? -1 : 1));
+
+  for (const order of arrivals) {
+    let index = slots.indexOf(null);
+    if (index === -1) index = slots.push(null) - 1;
+    slots[index] = order.orderId;
+  }
+
+  // Forget retired orders once they leave the window, so the set cannot grow.
+  for (const id of retired) {
+    if (!byId.has(id)) retired.delete(id);
+  }
+
+  // Trim trailing free slots, so the rail is as long as the work in it. Gaps
+  // *between* seated orders stay, because those hold position for the ticket
+  // after them; trailing ones hold nothing and would just be rows of empty
+  // boxes when the rail is far below its cap.
+  while (slots.length && slots[slots.length - 1] === null) slots.pop();
+
+  const showing = [];
+  const children = [];
+
+  for (const id of slots) {
+    const order = id ? byId.get(id) : null;
+    if (!order) {
+      // An empty slot still holds its place, or every ticket after it would
+      // shift the moment one order finished.
+      children.push(el('div', { class: 'ticket-slot' }));
       continue;
     }
 
-    const node = existing.get(order.orderId) || ticket(order, pipelines);
+    let node = seatedNodes.get(id);
+    if (!node) {
+      node = ticket(order, pipelines);
+      seatedNodes.set(id, node);
+    }
     updateTicket(node, order, pipelines);
 
-    // A finished order plays out and goes. It keeps its place in the rail
-    // while it fades, so the orders around it do not jump.
+    // A finished order plays out and goes, keeping its slot while it fades.
     if (order.status === 'Completed' && !node.dataset.leaving) {
       node.dataset.leaving = '1';
       node.classList.add('ticket-leaving');
-      const id = order.orderId;
-      setTimeout(() => {
-        retired.add(id);
-        node.remove();
-      }, leaveMs);
+      setTimeout(() => retired.add(id), leaveMs);
     }
 
-    nodes.push(node);
+    if (filter(order)) {
+      children.push(node);
+      showing.push(id);
+    } else {
+      // Filtering is a deliberate inspection, so it collapses rather than
+      // leaving the rail full of holes. Positions are stable in the default
+      // view, which is the one being watched.
+      children.push(el('div', { class: 'ticket-slot ticket-slot-hidden' }));
+    }
   }
 
-  container.replaceChildren(...nodes);
+  container.replaceChildren(...children);
   drawnOnce = true;
-  return nodes.length;
+  return showing.length;
 }
 
 function ticket(order, pipelines) {

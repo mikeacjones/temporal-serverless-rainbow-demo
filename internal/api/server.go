@@ -47,6 +47,12 @@ type Options struct {
 	// TrafficMaxRun is how long generated traffic may flow untouched before
 	// stopping itself. Zero uses the generator's own default.
 	TrafficMaxRun time.Duration
+
+	// OrderSample is how many live orders the rail shows. Zero uses the
+	// default. Raise it to watch more orders at once; the practical ceiling is
+	// how many tickets a browser can animate and a person can read, not the
+	// cost of the query, which is one page either way.
+	OrderSample int
 }
 
 // Server holds the backend's state: one cached snapshot, one SSE hub, and
@@ -66,6 +72,8 @@ type Server struct {
 	// half-updated picture.
 	mu       sync.RWMutex
 	snapshot *Snapshot
+
+	orderSample int
 
 	history    *History
 	throughput *throughputMeter
@@ -88,6 +96,9 @@ func New(opts Options) *Server {
 	if opts.ControlQueue == "" {
 		opts.ControlQueue = rollout.TaskQueue
 	}
+	if opts.OrderSample <= 0 {
+		opts.OrderSample = defaultLiveOrderSample
+	}
 
 	return &Server{
 		deployment:    opts.Deployment,
@@ -97,6 +108,7 @@ func New(opts Options) *Server {
 		traffic:       &trafficController{c: opts.Client, logger: opts.Logger, maxRun: opts.TrafficMaxRun},
 		rollouts:      &rolloutController{c: opts.Client, taskQueue: opts.ControlQueue, logger: opts.Logger},
 		allowedOrigin: opts.AllowedOrigin,
+		orderSample:   opts.OrderSample,
 		history:       &History{},
 		throughput:    &throughputMeter{},
 		syncMatch: metrics.NewSyncMatchReader(metrics.SyncMatchOptions{

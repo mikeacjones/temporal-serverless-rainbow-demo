@@ -21,10 +21,31 @@ html = open('frontend/index.html').read()
 
 failures = []
 
-# 1. Every function called must be defined.
+# 1. Every function called must be defined, or be a parameter holding one.
 defined = set(re.findall(r'function\s+([A-Za-z_$][\w$]*)\s*\(', js))
 defined |= set(re.findall(r'const\s+([A-Za-z_$][\w$]*)\s*=\s*\(', js))
-called = set(re.findall(r'(?<![.\w$])([a-z_$][\w$]*)\s*\(', js))
+
+# Parameters count as defined: a predicate or callback passed in is called by
+# name, and is not something this file declares.
+params = set()
+for plist in re.findall(r'function\s*[A-Za-z_$\w]*\s*\(([^)]*)\)', js):
+    params |= {p.strip().split('=')[0].strip() for p in plist.split(',') if p.strip()}
+for plist in re.findall(r'\(([^()]*)\)\s*=>', js):
+    params |= {p.strip().split('=')[0].strip() for p in plist.split(',') if p.strip()}
+params |= set(re.findall(r'([A-Za-z_$][\w$]*)\s*=>', js))
+
+# Destructured bindings count too, e.g. `for (const [name, draw] of ...)`
+# binds draw to a function that is then called by name.
+for names in re.findall(r'(?:const|let|var)\s*\[([^\]]*)\]', js):
+    params |= {n.strip() for n in names.split(',') if n.strip()}
+defined |= {p for p in params if re.fullmatch(r'[A-Za-z_$][\w$]*', p or '')}
+
+# A leading dot means a method call on something else, which is not this
+# file's business — except that the spread operator looks identical to the
+# regex. `...stepDots(x)` is a plain call, so spreads are removed first;
+# without this, every call made inside a spread went unchecked.
+calls_src = js.replace('...', ' ')
+called = set(re.findall(r'(?<![.\w$])([a-z_$][\w$]*)\s*\(', calls_src))
 
 builtins = {
     'if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'typeof', 'new', 'await',
@@ -32,10 +53,10 @@ builtins = {
     'Number', 'String', 'Math', 'Set', 'Map', 'Date', 'Boolean', 'JSON', 'Array', 'Object',
     'fetch', 'setTimeout', 'parseInt', 'parseFloat', 'console', 'document',
 }
-# Callback parameters and CSS function names, which are not ours to define.
-locals_ = {'caption', 'mix', 'success', 'translateX', 'var', 'draw'}
+# CSS function names that appear inside style strings, not calls.
+css = {'mix', 'translateX', 'var'}
 
-undefined = sorted(called - defined - builtins - locals_)
+undefined = sorted(called - defined - builtins - css)
 if undefined:
     failures.append(f'calls to undefined functions: {undefined}')
 

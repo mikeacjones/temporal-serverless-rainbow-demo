@@ -493,6 +493,14 @@ select { width: 100%; }
 }
 .ticket-stuck { border-color: color-mix(in srgb, var(--trouble) 40%, transparent); border-left-color: var(--trouble); }
 
+/* An empty slot holds its place so nothing shifts when an order finishes. */
+.ticket-slot {
+  border: 1px dashed var(--hairline);
+  border-radius: var(--radius-lg);
+  min-height: 78px;
+}
+.ticket-slot-hidden { border-style: none; }
+
 /* A finished order plays out and leaves, rather than sitting greyed out
  * occupying a slot. It keeps its place in the rail while it fades so the
  * orders around it do not jump. */

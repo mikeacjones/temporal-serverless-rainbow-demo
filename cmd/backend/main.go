@@ -71,6 +71,8 @@ func run(logger *slog.Logger) error {
 		// workers are serverless: orders left running overnight keep invoking
 		// Lambdas, and each invocation bills for its whole window.
 		TrafficMaxRun: config.EnvDuration("TRAFFIC_MAX_RUN", traffic.DefaultMaxRun),
+		// How many live orders the rail seats at once.
+		OrderSample: config.EnvInt("LIVE_ORDER_SAMPLE", 0),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
