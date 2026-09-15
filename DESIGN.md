@@ -293,33 +293,54 @@ orders/min. Here, the order Workflow upserts search attributes
 - the **live order strip** is a *sampled* `ListWorkflowExecutions`
   page (most recent ~40), not every open order.
 
-Panels:
+Panels (as rebuilt on the `ui-redesign` branch):
 
-1. **Traffic** — rate slider/presets (0 / 100 / 500 / 1,000 per
-   min), Spike buttons (500 / 1,000 / 5,000), live starts-per-sec,
-   running / completed / failed.
-2. **Scale** — backlog depth, how long the oldest task has waited, and
-   live poller count as the serverless-concurrency proxy, with
-   sparklines. (Ported from no-roads' `/api/metrics`, with its derived
-   "sync match rate" replaced — see Corrections.)
-3. **Versions** — a card per registered version: label, status chip
-   (`CURRENT` / `RAMPING n%` / `DRAINING` / `INACTIVE`), traffic %,
-   in-flight count, error rate, and **Start deployment** on every
-   non-current version.
-4. **Rollout** — stage timeline (gate → 1% → 5% → 25% → 50% →
-   100%), live health readout, and the manual controls: Pause,
-   Resume, Next stage, Jump to %, Abort + rollback.
-5. **Chaos** — target version, step, mode, sampled rate.
-6. **Live orders** — sampled strip coloured by version, plus a
-   **batch** recovery action — the per-card *Fix* button does not scale
-   to thousands of orders.
+1. **Top strip** — orders/min in, served/min, in flight, queued, median
+   order time, and stuck (which appears only when something is stuck).
+2. **Order routing** — the hero. Three segmented bars: where new orders
+   are sent, where orders actually are, and where the workers actually
+   are. The gap between the first two is the pinning guarantee; the third
+   is empty at rest and fills per version as work arrives. A live
+   deployment's controls sit in this panel's header, beside the bars they
+   move, with its stage rail, health readout and canary result below.
+3. **Order flow** — steady rate with presets, and burst triggers.
+4. **Worker fleet** — workers running, sync match rate, backlog task
+   queue, longest wait, and a peak-worker sparkline.
+5. **Break a version** — target version, step, mode and blast radius.
+6. **Versions & pipelines** — a card per version: routing role, share of
+   new orders, its own live worker count, in-flight and served counts,
+   its pipeline as a ladder, and buttons to start a deployment, send
+   orders straight to it, or rescue orders stranded on it.
+7. **On the rail** — sampled live orders, **oldest first**, each drawing
+   its journey as one dot per step of *its* version's pipeline.
 
 Recovery is a **server-side batch**: one `StartBatchOperation` with a
 `BatchOperationReset` whose `PostResetOperations` pin each new run to the
 healthy Current build. That is better than the per-order loop originally
-planned — it is durable, throttled, survives a backend restart, and needs
-one API call rather than thousands. Verified live: 37 stranded orders
-recovered to zero.
+planned — durable, throttled, surviving a backend restart, and one API
+call rather than thousands. Verified live: 37 stranded orders recovered
+to zero.
+
+### The rail has to be followable
+
+Two properties, and both took a deliberate fix:
+
+**Stable order.** Visibility returns orders newest-first, so every
+ticket moved every second and no single order could be watched. The rail
+is ordered oldest-first, which turns it into a conveyor: an order joins
+at the end, rises as those ahead complete and drop off, and leaves from
+the front.
+
+**Stable identity.** Rebuilding the list each tick destroyed and
+recreated every ticket, restarting the pulse on the live step dot — the
+one thing showing an order is alive. Tickets are now reconciled by order
+ID, and existing nodes are handed back to `replaceChildren`, which moves
+them rather than recreating them. Measured at 240 orders/min: 93% of
+tickets persist between consecutive frames.
+
+The sample size (60) follows from this. Visibility returns the newest N,
+so too small an N at a high order rate drops an order out of the window
+before it finishes, and it appears to vanish halfway through.
 
 ---
 
