@@ -1,0 +1,13 @@
+# Keep the build context small and the layer cache stable: only go.mod,
+# go.sum, cmd/ and internal/ are actually copied by the Dockerfiles.
+.git
+.github
+bin
+dist
+.run-logs
+deploy/k8s
+docs
+*.md
+compose.yaml
+Makefile
+.DS_Store
