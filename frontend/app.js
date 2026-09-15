@@ -219,10 +219,6 @@ function renderSpectrum(s) {
     .filter((v) => v.share > 0);
   drawBar($('split-inflight'), inFlight, 'No orders in flight', (x) => int(x.share));
 
-  const workers = versions
-    .map((v) => ({ label: v.label, share: v.pollers || 0 }))
-    .filter((v) => v.share > 0);
-  drawBar($('split-workers'), workers, 'No workers running anywhere', (x) => int(x.share));
 
   // The shift chip names the move a live rollout is making.
   const rollout = s.rollout;
@@ -483,27 +479,9 @@ function renderFleet(s) {
 
   renderSyncMatch(s.syncMatch || {});
 
-  // Say which way the backlog is going, in the plainest terms available.
-  // Arrival and pickup rates match exactly when a saturated queue holds
-  // steady, so a rate comparison alone would report everything as fine while
-  // orders sit waiting for minutes.
-  const added = capacity.addedPerSec || 0;
-  const taken = capacity.dispatchedPerSec || 0;
-  const queued = capacity.backlogDepth || 0;
-
-  let note = 'Nothing is provisioned until there is work. Send orders to a version and its workers appear.';
-  if (added > 0 || taken > 0 || queued > 0) {
-    const state = added > taken * 1.05 ? 'the backlog is growing'
-      : taken > added * 1.05 ? 'the backlog is draining'
-      : queued > 0 ? `the backlog is holding at ${int(queued)}`
-      : 'nothing is waiting for a worker';
-    note = `${added.toFixed(1)} tasks a second arriving, ${taken.toFixed(1)} picked up — ${state}.`;
-  }
-  $('capacity-note').textContent = note;
-
   const history = s.history || {};
-  spark($('spark-pollers'), history.pollers, 'var(--cyan)');
-  spark($('spark-backlog'), history.backlog, 'var(--v4)');
+  drawSpark($('spark-pollers'), history.pollers, 'var(--cyan)');
+  drawSpark($('spark-backlog'), history.backlog, 'var(--v4)');
 
   // Name the peak over the window the graph actually shows, so the figure is
   // scoped rather than implied.
@@ -553,13 +531,16 @@ function renderSyncMatch(syncMatch) {
 // which reads as continuous movement instead of a jump every second.
 // Recreating the nodes would reset that transition, and the pulse on the
 // leading edge, every frame.
-function spark(svg, series, color) {
+function drawSpark(svg, series, color) {
   if (!series || series.length < 2) {
     svg.replaceChildren();
     return;
   }
 
-  const width = 120, height = 30;
+  // Dimensions come from the element's own viewBox, so the same routine draws
+  // the taller fleet gauges and the shorter version-card graphs.
+  const [, , width, height] = (svg.getAttribute('viewBox') || '0 0 120 30')
+    .split(/\s+/).map(Number);
   const max = Math.max(...series, 1);
   const step = width / (series.length - 1);
 
@@ -610,110 +591,162 @@ function peakOf(series) {
   return series && series.length ? Math.max(...series) : 0;
 }
 
+// renderStations reconciles the version cards by label rather than rebuilding
+// them.
+//
+// Rebuilding every second had two costs beyond the wasted work. The burst-size
+// input was recreated each frame, so a typed value was wiped about a second
+// later and only the default could actually be used. And a sparkline inside a
+// card that is thrown away cannot animate, for the same reason the order
+// tickets could not.
 function renderStations(s) {
   const routing = s.deployment.routing || {};
   const versions = s.deployment.versions || [];
-  const rolloutLive = s.rollout && LIVE_PHASES.has(s.rollout.phase);
+  const container = $('stations');
 
   $('roster-count').textContent = `${versions.length} registered`;
 
-  $('stations').replaceChildren(...versions.map((version) => {
-    const health = s.health[version.label] || {};
-    const stuck = health.degraded || 0;
-    const serving = version.trafficPct > 0;
+  const existing = new Map();
+  for (const node of container.children) existing.set(node.dataset.version, node);
 
-    const station = el('div', {
-      class: 'station' + (stuck > 0 ? ' station-trouble' : serving ? ' station-active' : ''),
-    });
-    station.style.setProperty('--version-color', colorFor(version.label));
+  container.replaceChildren(...versions.map((version) => {
+    const node = existing.get(version.label) || stationShell(version.label);
+    return updateStation(node, version, s, routing);
+  }));
+}
 
-    const head = el('div', { class: 'station-head' });
-    const nameRow = el('div', { class: 'station-name-row' });
-    nameRow.append(
-      el('span', { class: 'station-name', text: version.label }),
-      el('span', { class: 'station-role station-role-' + version.status, text: roleText(version) }),
-    );
-    head.append(nameRow);
+// stationShell builds the parts of a card that never change, so that updates
+// only have to write text and classes.
+function stationShell(label) {
+  const station = el('div', { class: 'station' });
+  station.dataset.version = label;
+  station.style.setProperty('--version-color', colorFor(label));
 
-    const share = el('div', { class: 'station-share' });
-    share.append(
-      el('span', { class: 'station-share-value', text: pct(version.trafficPct) }),
-      el('span', { class: 'station-share-name', text: 'of new orders' }),
-    );
-    head.append(share);
+  const head = el('div', { class: 'station-head' });
 
-    // Workers next: with serverless workers this is the number that tells the
-    // story, and a version at zero is the normal resting state.
-    const workers = el('div', { class: 'station-workers' + (version.pollers ? ' station-workers-live' : '') });
-    workers.append(
-      el('span', { class: 'station-workers-value', text: int(version.pollers || 0) }),
-      el('span', {
-        class: 'station-workers-name',
-        text: version.pollers ? 'workers running' : 'no workers running',
-      }),
-    );
-    head.append(workers);
+  const nameRow = el('div', { class: 'station-name-row' });
+  nameRow.append(
+    el('span', { class: 'station-name', text: label }),
+    el('span', { class: 'station-role' }),
+  );
 
-    const counts = el('div', { class: 'station-counts' });
-    // The pipeline is no longer listed step by step here — every order ticket
-    // draws it as dots — but its length is what differs between versions, so
-    // it stays as a number.
-    const steps = ((s.pipelines || {})[version.label] || []).length;
-    if (steps) counts.append(countNode('steps', steps));
-    counts.append(countNode('in flight', health.running || 0));
-    counts.append(countNode('served', health.completed || 0));
-    if (stuck > 0) {
-      const node = countNode('stuck', stuck);
-      node.className = 'station-stuck';
-      counts.append(node);
-    }
-    head.append(counts);
-    station.append(head);
+  const share = el('div', { class: 'station-share' });
+  share.append(
+    el('span', { class: 'station-share-value' }),
+    el('span', { class: 'station-share-name', text: 'of new orders' }),
+  );
 
-    const foot = el('div', { class: 'station-foot' });
-    if (version.label === routing.currentLabel) {
-      foot.append(el('span', { class: 'station-role station-role-current', text: 'Taking orders now' }));
+  const workers = el('div', { class: 'station-workers' });
+  workers.append(
+    el('span', { class: 'station-workers-value' }),
+    el('span', { class: 'station-workers-name' }),
+  );
+
+  // Its own workers over time, under its own count.
+  const sparkSvg = svgEl('svg', {
+    class: 'spark spark-station',
+    viewBox: '0 0 120 26',
+    preserveAspectRatio: 'none',
+    'aria-hidden': 'true',
+  });
+
+  head.append(nameRow, share, workers, sparkSvg, el('div', { class: 'station-counts' }));
+  station.append(head, el('div', { class: 'station-foot' }));
+  return station;
+}
+
+function updateStation(station, version, s, routing) {
+  const health = s.health[version.label] || {};
+  const stuck = health.degraded || 0;
+  const serving = version.trafficPct > 0;
+
+  station.className = 'station'
+    + (stuck > 0 ? ' station-trouble' : serving ? ' station-active' : '');
+
+  const [head, foot] = station.children;
+  const [nameRow, share, workers, sparkSvg, counts] = head.children;
+
+  const role = nameRow.children[1];
+  role.className = 'station-role station-role-' + version.status;
+  role.textContent = roleText(version);
+
+  share.children[0].textContent = pct(version.trafficPct);
+
+  workers.className = 'station-workers' + (version.pollers ? ' station-workers-live' : '');
+  workers.children[0].textContent = int(version.pollers || 0);
+  workers.children[1].textContent = version.pollers ? 'workers running' : 'no workers running';
+
+  drawSpark(sparkSvg, ((s.history || {}).pollersByVersion || {})[version.label], colorFor(version.label));
+
+  // The pipeline is no longer listed step by step here — every order ticket
+  // draws it as dots — but its length is what differs between versions, so it
+  // stays as a number.
+  const steps = ((s.pipelines || {})[version.label] || []).length;
+  const parts = [];
+  if (steps) parts.push(countNode('steps', steps));
+  parts.push(countNode('in flight', health.running || 0));
+  parts.push(countNode('served', health.completed || 0));
+  if (stuck > 0) {
+    const node = countNode('stuck', stuck);
+    node.className = 'station-stuck';
+    parts.push(node);
+  }
+  counts.replaceChildren(...parts);
+
+  updateStationFoot(foot, version, s, routing, health, stuck);
+  return station;
+}
+
+// updateStationFoot rewrites the buttons only when the set of them changes, so
+// the burst-size input keeps whatever has been typed into it.
+function updateStationFoot(foot, version, s, routing, health, stuck) {
+  const rolloutLive = s.rollout && LIVE_PHASES.has(s.rollout.phase);
+  const isCurrent = version.label === routing.currentLabel;
+  const canRescue = stuck > 0 && !isCurrent;
+
+  // A signature of *which* controls belong here, deliberately excluding any
+  // number that ticks. Including the rescue count would rebuild the foot every
+  // second whenever orders were stranded — clobbering the burst-size input at
+  // exactly the moment an operator is most likely to be typing into it.
+  const shape = [isCurrent, canRescue, routing.currentLabel].join('|');
+
+  if (foot.dataset.shape !== shape) {
+    foot.dataset.shape = shape;
+
+    const parts = [];
+    if (isCurrent) {
+      parts.push(el('span', { class: 'station-role station-role-current', text: 'Taking orders now' }));
     } else {
-      const start = button('Start deployment', 'btn-primary', () =>
+      parts.push(button('Start deployment', 'btn-primary', () =>
         act('/api/rollout', { targetVersion: version.label },
-          (state) => `Deploying ${state.targetVersion}: checking it first`));
-      start.disabled = rolloutLive;
-      if (rolloutLive) start.title = 'A deployment is already running';
-      foot.append(start);
+          (state) => `Deploying ${state.targetVersion}: checking it first`)));
     }
 
     // Send orders straight here, whatever the routing says. Aimed at idle
     // versions especially: they have no workers running, so the burst makes
     // serverless workers appear from nothing.
-    foot.append(dumpControl(version.label));
+    parts.push(dumpControl(version.label));
 
-    if (stuck > 0 && version.label !== routing.currentLabel) {
-      const running = health.running || 0;
-      const move = button(`Move ${int(running)} to ${routing.currentLabel}`, '', () =>
+    if (canRescue) {
+      const move = button(`Move ${int(health.running || 0)} to ${routing.currentLabel}`, 'btn-rescue', () =>
         act('/api/orders/recover', { version: version.label }, (data) => data.message));
       move.title = `Restart every order still running on ${version.label}, pinned to ${routing.currentLabel}`;
-      foot.append(move);
+      parts.push(move);
     }
-    station.append(foot);
+    foot.replaceChildren(...parts);
+  }
 
-    return station;
-  }));
-}
+  // Anything that ticks is written in place instead.
+  const start = foot.querySelector('.btn-primary');
+  if (start) {
+    start.disabled = rolloutLive;
+    start.title = rolloutLive ? 'A deployment is already running' : '';
+  }
 
-function dumpControl(label) {
-  const row = el('div', { class: 'dump' });
-
-  const count = el('input', { type: 'number', min: '1', max: '20000', step: '50', class: 'dump-count' });
-  count.value = 250;
-  count.setAttribute('aria-label', `Orders to send straight to ${label}`);
-
-  const send = button(`Send to ${label}`, '', () =>
-    act('/api/versions/dump', { version: label, count: Number(count.value) },
-      () => `Sent ${int(count.value)} orders straight to ${label}`));
-  send.title = `Start orders pinned to ${label}, ignoring the routing split`;
-
-  row.append(count, send);
-  return row;
+  const rescue = foot.querySelector('.btn-rescue');
+  if (rescue) {
+    rescue.textContent = `Move ${int(health.running || 0)} to ${routing.currentLabel}`;
+  }
 }
 
 function roleText(version) {

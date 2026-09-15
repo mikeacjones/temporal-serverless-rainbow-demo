@@ -116,7 +116,6 @@ body {
   color: var(--ink);
 }
 
-.panel-note { margin: 12px 0 0; color: var(--ink-faint); font-size: 12px; line-height: 16px; }
 
 /* --- Top HUD strip ------------------------------------------------------- */
 
@@ -394,6 +393,10 @@ select { width: 100%; }
 .spark-shift { transform: translateX(0); }
 .spark-shift-animate { transition: transform 1s linear; }
 .spark-line { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+
+/* Version-card graphs are shorter than the fleet gauges: a texture beside a
+ * number rather than a chart in its own right. */
+.spark-station { height: 26px; margin-top: 6px; }
 
 /* The leading edge marks "now", and pulsing it is what makes an idle graph
  * still look live. */

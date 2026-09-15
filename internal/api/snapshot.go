@@ -71,6 +71,32 @@ type History struct {
 	CompletedPerMin []float64 `json:"completedPerMin"`
 	OldestWaitSec   []float64 `json:"oldestWaitSec"`
 	SyncMatchPct    []float64 `json:"syncMatchPct"`
+
+	// PollersByVersion is one worker-count series per version, so each
+	// version card can show its own workers arriving and leaving rather than
+	// only the fleet total.
+	PollersByVersion map[string][]int `json:"pollersByVersion,omitempty"`
+}
+
+// pushVersions records each version's current worker count.
+//
+// Versions that are no longer registered are dropped, so a demo that runs for
+// hours does not accumulate series for versions that have been deleted.
+func (h *History) pushVersions(versions []deploy.Version) {
+	if h.PollersByVersion == nil {
+		h.PollersByVersion = map[string][]int{}
+	}
+
+	registered := make(map[string]bool, len(versions))
+	for _, v := range versions {
+		registered[v.Label] = true
+		h.PollersByVersion[v.Label] = appendCapped(h.PollersByVersion[v.Label], v.Pollers)
+	}
+	for label := range h.PollersByVersion {
+		if !registered[label] {
+			delete(h.PollersByVersion, label)
+		}
+	}
 }
 
 // push appends a sample, discarding the oldest once full.
@@ -244,6 +270,8 @@ func (s *Server) build(ctx context.Context) *Snapshot {
 	applySplit(snapshot)
 
 	s.history.push(snapshot.Capacity, snapshot.Totals, snapshot.CompletedPerMin, snapshot.SyncMatch.RatePct)
+	// After attachPollers, so each version's count is the one just read.
+	s.history.pushVersions(snapshot.Deployment.Versions)
 	snapshot.History = *s.history
 
 	return snapshot
