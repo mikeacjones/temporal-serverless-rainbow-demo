@@ -1,0 +1,185 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
+	"go.temporal.io/sdk/client"
+
+	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/orders"
+	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/rollout"
+	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/traffic"
+)
+
+// trafficController drives the generator Workflow on the dashboard's behalf.
+type trafficController struct {
+	c      client.Client
+	logger *slog.Logger
+	// maxRun is how long traffic may flow untouched before stopping itself.
+	maxRun time.Duration
+}
+
+// state returns the generator's live state, or nil when it is not running.
+func (t *trafficController) state(ctx context.Context) *traffic.State {
+	var state traffic.State
+	value, err := t.c.QueryWorkflow(ctx, traffic.WorkflowID, "", traffic.QueryGetState)
+	if err != nil {
+		// Not running is the normal case before anyone presses play.
+		return nil
+	}
+	if err := value.Get(&state); err != nil {
+		t.logger.Debug("cannot decode traffic state", "err", err)
+		return nil
+	}
+	return &state
+}
+
+// chaos returns the live fault-injection setting, which the canary gate needs
+// so that a sabotaged candidate fails its probes.
+func (t *trafficController) chaos(ctx context.Context) *orders.ChaosSpec {
+	state := t.state(ctx)
+	if state == nil || state.Chaos.Pct <= 0 {
+		return nil
+	}
+	return state.Chaos.Spec
+}
+
+// ensure starts the generator if it is not already running.
+//
+// WorkflowIDConflictPolicy: UseExisting makes this idempotent, so the
+// dashboard can call it before any control action without racing itself.
+func (t *trafficController) ensure(ctx context.Context) error {
+	_, err := t.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:                       traffic.WorkflowID,
+		TaskQueue:                traffic.TaskQueue,
+		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+	}, traffic.WorkflowTypeName, traffic.Input{MaxRun: t.maxRun})
+	if err != nil {
+		return fmt.Errorf("start traffic generator: %w", err)
+	}
+	return nil
+}
+
+// update sends one control Update to the generator, starting it first if need be.
+func (t *trafficController) update(ctx context.Context, name string, args ...any) (traffic.State, error) {
+	if err := t.ensure(ctx); err != nil {
+		return traffic.State{}, controlPlaneError(err)
+	}
+
+	handle, err := t.c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
+		WorkflowID:   traffic.WorkflowID,
+		UpdateName:   name,
+		Args:         args,
+		WaitForStage: client.WorkflowUpdateStageCompleted,
+	})
+	if err != nil {
+		return traffic.State{}, controlPlaneError(fmt.Errorf("traffic %s: %w", name, err))
+	}
+
+	var state traffic.State
+	if err := handle.Get(ctx, &state); err != nil {
+		return traffic.State{}, controlPlaneError(fmt.Errorf("traffic %s: %w", name, err))
+	}
+	return state, nil
+}
+
+// controlPlaneError adds the likely cause to an Update failure.
+//
+// An Update to a control-plane Workflow can only complete if a control worker
+// is polling. When one is not — during startup, or because that container is
+// down — the underlying error is a bare deadline or unavailable, which tells an
+// operator nothing about what to fix.
+func controlPlaneError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w — is the control plane running? (docker compose ps control)", err)
+}
+
+// rolloutController drives the rollout coordinator Workflow.
+type rolloutController struct {
+	c         client.Client
+	taskQueue string
+	logger    *slog.Logger
+}
+
+// ErrRolloutRunning is returned when a rollout is asked for while one is live.
+var ErrRolloutRunning = errors.New("a rollout is already in progress")
+
+// rolloutMaxDuration caps a rollout, so one left paused cannot block the next
+// one indefinitely. Comfortably longer than any plan a demo would use.
+const rolloutMaxDuration = 2 * time.Hour
+
+// state returns the current rollout's state, or nil when none has run.
+//
+// A finished rollout still answers this Query, which is deliberate: the
+// dashboard should keep showing the outcome of the last rollout rather than
+// blanking the panel the moment it ends.
+func (r *rolloutController) state(ctx context.Context) *rollout.State {
+	var state rollout.State
+	value, err := r.c.QueryWorkflow(ctx, rollout.WorkflowID, "", rollout.QueryGetState)
+	if err != nil {
+		return nil
+	}
+	if err := value.Get(&state); err != nil {
+		r.logger.Debug("cannot decode rollout state", "err", err)
+		return nil
+	}
+	return &state
+}
+
+// start begins a rollout, refusing to start a second one alongside a live one.
+func (r *rolloutController) start(ctx context.Context, in rollout.Input) (rollout.State, error) {
+	if current := r.state(ctx); current != nil && !current.Phase.Terminal() {
+		return rollout.State{}, fmt.Errorf("%w (%s to %s)",
+			ErrRolloutRunning, current.Phase, current.TargetVersion)
+	}
+
+	_, err := r.c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:        rollout.WorkflowID,
+		TaskQueue: r.taskQueue,
+		// A rollout must not outlive the presentation it belongs to, and a
+		// coordinator left running would block the next one.
+		WorkflowExecutionTimeout: rolloutMaxDuration,
+		// Fail rather than terminate: if a rollout is somehow still live, the
+		// right answer is to say so, not to kill it mid-ramp.
+		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+	}, rollout.WorkflowTypeName, in)
+	if err != nil {
+		var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
+		if errors.As(err, &alreadyStarted) {
+			return rollout.State{}, ErrRolloutRunning
+		}
+		return rollout.State{}, fmt.Errorf("start rollout: %w", err)
+	}
+
+	// The Workflow sets its own initial state; return what it reports.
+	if state := r.state(ctx); state != nil {
+		return *state, nil
+	}
+	return rollout.State{TargetVersion: in.TargetVersion, Phase: rollout.PhasePending}, nil
+}
+
+// update sends one control Update to the live rollout.
+func (r *rolloutController) update(ctx context.Context, name string, args ...any) (rollout.State, error) {
+	handle, err := r.c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
+		WorkflowID:   rollout.WorkflowID,
+		UpdateName:   name,
+		Args:         args,
+		WaitForStage: client.WorkflowUpdateStageCompleted,
+	})
+	if err != nil {
+		return rollout.State{}, fmt.Errorf("rollout %s: %w", name, err)
+	}
+
+	var state rollout.State
+	if err := handle.Get(ctx, &state); err != nil {
+		return rollout.State{}, fmt.Errorf("rollout %s: %w", name, err)
+	}
+	return state, nil
+}

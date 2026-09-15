@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Order ops — rainbow deploys</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-name">Order ops</span>
+  </div>
+
+  <div class="readouts">
+    <div class="readout">
+      <span class="readout-value" id="rate-actual">—</span>
+      <span class="readout-unit">orders/min in</span>
+    </div>
+    <div class="readout">
+      <span class="readout-value" id="throughput">—</span>
+      <span class="readout-unit">served/min</span>
+    </div>
+    <div class="readout">
+      <span class="readout-value" id="inflight">—</span>
+      <span class="readout-unit">in flight</span>
+    </div>
+    <div class="readout readout-trouble" id="stuck-readout" hidden>
+      <span class="readout-value" id="stuck">—</span>
+      <span class="readout-unit">stuck</span>
+    </div>
+  </div>
+
+  <div class="link-status">
+    <span class="link-dot" id="link-dot"></span>
+    <span id="link-text">connecting</span>
+  </div>
+</header>
+
+<!-- The hero: where orders are being sent, and where they actually are. -->
+<section class="split" aria-labelledby="split-heading">
+  <h2 id="split-heading" class="sr-only">Traffic split by version</h2>
+
+  <div class="split-row">
+    <p class="split-label">New orders routed to</p>
+    <div class="split-bar" id="split-routing" role="img" aria-label="Share of new orders by version"></div>
+  </div>
+
+  <div class="split-row">
+    <p class="split-label">Orders in flight right now</p>
+    <div class="split-bar split-bar-inflight" id="split-inflight" role="img" aria-label="Share of in-flight orders by version"></div>
+    <p class="split-note">In-flight orders never move version. A deploy changes only where <em>new</em> orders go.</p>
+  </div>
+
+  <div class="split-row">
+    <p class="split-label">Workers running, by version</p>
+    <div class="split-bar split-bar-workers" id="split-workers" role="img" aria-label="Workers running by version"></div>
+    <p class="split-note">Nothing is provisioned until there is work. Send orders to a version and its workers appear.</p>
+  </div>
+</section>
+
+<main class="grid">
+
+  <!-- Traffic shaping -->
+  <section class="panel panel-flow" aria-labelledby="flow-heading">
+    <h2 id="flow-heading" class="panel-heading">Order flow</h2>
+
+    <div class="rate">
+      <label class="rate-field">
+        <span class="rate-caption">Steady rate</span>
+        <span class="rate-input-wrap">
+          <input type="number" id="rate-input" min="0" max="20000" step="10" value="0" aria-label="Orders per minute">
+          <span class="rate-suffix">/min</span>
+        </span>
+      </label>
+      <button class="btn btn-primary" id="rate-apply">Set rate</button>
+    </div>
+
+    <div class="chips" role="group" aria-label="Rate presets">
+      <button class="chip" data-rate="0">Stop</button>
+      <button class="chip" data-rate="120">120</button>
+      <button class="chip" data-rate="600">600</button>
+      <button class="chip" data-rate="1000">1,000</button>
+      <button class="chip" data-rate="2500">2,500</button>
+    </div>
+
+    <p class="autostop" id="autostop" hidden></p>
+
+    <div class="spike">
+      <p class="field-caption">Dump a burst on top</p>
+      <div class="chips" role="group" aria-label="Spike size">
+        <button class="chip chip-spike" data-spike="500">500</button>
+        <button class="chip chip-spike" data-spike="1000">1,000</button>
+        <button class="chip chip-spike" data-spike="5000">5,000</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Capacity -->
+  <section class="panel panel-capacity" aria-labelledby="capacity-heading">
+    <h2 id="capacity-heading" class="panel-heading">Capacity</h2>
+
+    <div class="gauges">
+      <div class="gauge">
+        <span class="gauge-value" id="backlog">—</span>
+        <span class="gauge-name">backlog task queue</span>
+        <svg class="spark" id="spark-backlog" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+      <div class="gauge">
+        <span class="gauge-value" id="pollers">—</span>
+        <span class="gauge-name">workers polling</span>
+        <svg class="spark" id="spark-pollers" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+      <div class="gauge">
+        <span class="gauge-value" id="oldest-wait">—</span>
+        <span class="gauge-name">longest a task has waited</span>
+        <svg class="spark" id="spark-wait" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+      <div class="gauge gauge-primary">
+        <span class="gauge-value" id="syncmatch">—</span>
+        <span class="gauge-name" id="syncmatch-name">handed straight to a waiting worker</span>
+        <svg class="spark" id="spark-syncmatch" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+    </div>
+
+    <p class="capacity-note" id="capacity-note">When work arrives faster than workers can take it, the queue grows and more workers are started.</p>
+  </section>
+
+  <!-- Rollout -->
+  <section class="panel panel-rollout" aria-labelledby="rollout-heading">
+    <h2 id="rollout-heading" class="panel-heading">Deployment</h2>
+    <div id="rollout-body">
+      <p class="empty">No deployment running. Pick a version below and start one.</p>
+    </div>
+  </section>
+
+  <!-- Fault injection -->
+  <section class="panel panel-fault" aria-labelledby="fault-heading">
+    <h2 id="fault-heading" class="panel-heading">Break a version</h2>
+    <p class="field-caption">Sabotage one step so a deploy of it gets caught.</p>
+
+    <div class="fault-controls">
+      <label class="fault-field">
+        <span class="fault-caption">Version</span>
+        <select id="fault-version"></select>
+      </label>
+      <label class="fault-field">
+        <span class="fault-caption">Step</span>
+        <select id="fault-step"></select>
+      </label>
+      <label class="fault-field">
+        <span class="fault-caption">How</span>
+        <select id="fault-mode">
+          <option value="fail">Fails and retries</option>
+          <option value="slow">Runs very slowly</option>
+        </select>
+      </label>
+      <label class="fault-field fault-field-narrow">
+        <span class="fault-caption">Share</span>
+        <span class="rate-input-wrap">
+          <input type="number" id="fault-pct" min="0" max="100" step="5" value="100" aria-label="Percentage of orders affected">
+          <span class="rate-suffix">%</span>
+        </span>
+      </label>
+    </div>
+
+    <div class="fault-actions">
+      <button class="btn btn-danger" id="fault-apply">Break it</button>
+      <button class="btn" id="fault-clear">Clear fault</button>
+    </div>
+    <p class="fault-active" id="fault-active" hidden></p>
+  </section>
+
+</main>
+
+<!-- The version rail -->
+<section class="rail" aria-labelledby="rail-heading">
+  <h2 id="rail-heading" class="panel-heading rail-heading">Versions</h2>
+  <div class="stations" id="stations"></div>
+</section>
+
+<!-- Live orders -->
+<section class="tickets-section" aria-labelledby="tickets-heading">
+  <h2 id="tickets-heading" class="panel-heading">On the rail<span class="tickets-count" id="tickets-count"></span></h2>
+  <div class="tickets" id="tickets"></div>
+</section>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
