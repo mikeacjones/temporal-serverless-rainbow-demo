@@ -447,17 +447,6 @@ select { width: 100%; }
 .station-counts b { color: var(--ink); font-weight: 600; }
 .station-stuck, .station-stuck b { color: var(--trouble); }
 
-/* The pipeline as a ladder: rung count makes the shape difference obvious. */
-.ladder { list-style: none; margin: 0; padding: 11px 13px 12px; border-top: 1px solid var(--hairline); }
-.rung { position: relative; padding-left: 17px; color: var(--ink-faint); font-size: 12.5px; line-height: 1.85; }
-.rung::before {
-  content: ""; position: absolute; left: 3px; top: 9px;
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--version-color); opacity: 0.55;
-}
-.rung-new { color: var(--ink); font-weight: 600; }
-.rung-new::before { opacity: 1; box-shadow: 0 0 8px var(--version-color); }
-
 .station-foot { margin-top: auto; padding: 11px 13px 13px; border-top: 1px solid var(--hairline); display: flex; flex-wrap: wrap; gap: 7px; }
 .dump { display: flex; gap: 6px; width: 100%; }
 .dump-count { width: 68px; }
@@ -481,7 +470,26 @@ select { width: 100%; }
   border-radius: var(--radius-lg);
 }
 .ticket-stuck { border-color: color-mix(in srgb, var(--trouble) 40%, transparent); border-left-color: var(--trouble); }
-.ticket-done { opacity: 0.5; }
+
+/* A finished order plays out and leaves, rather than sitting greyed out
+ * occupying a slot. It keeps its place in the rail while it fades so the
+ * orders around it do not jump. */
+.ticket-leaving {
+  animation: ticketLeave 550ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  pointer-events: none;
+}
+
+@keyframes ticketLeave {
+  0%   { opacity: 1; transform: scale(1); }
+  30%  { opacity: 0.85; border-left-color: var(--cyan); }
+  100% { opacity: 0; transform: scale(0.94); }
+}
+
+/* Removal is driven by a timer, so with motion reduced the ticket simply
+ * dims for the same interval and then goes. */
+@media (prefers-reduced-motion: reduce) {
+  .ticket-leaving { opacity: 0.35; }
+}
 
 .ticket-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .ticket-id { font: 500 11px/15px var(--mono); letter-spacing: 0.04em; color: var(--ink-faint); }

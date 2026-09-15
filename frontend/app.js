@@ -560,10 +560,6 @@ function renderStations(s) {
 
   $('roster-count').textContent = `${versions.length} registered`;
 
-  // Steps the current version already has: anything else a candidate runs is
-  // a change worth pointing at.
-  const currentSteps = new Set((s.pipelines || {})[routing.currentLabel] || []);
-
   $('stations').replaceChildren(...versions.map((version) => {
     const health = s.health[version.label] || {};
     const stuck = health.degraded || 0;
@@ -602,6 +598,11 @@ function renderStations(s) {
     head.append(workers);
 
     const counts = el('div', { class: 'station-counts' });
+    // The pipeline is no longer listed step by step here — every order ticket
+    // draws it as dots — but its length is what differs between versions, so
+    // it stays as a number.
+    const steps = ((s.pipelines || {})[version.label] || []).length;
+    if (steps) counts.append(countNode('steps', steps));
     counts.append(countNode('in flight', health.running || 0));
     counts.append(countNode('served', health.completed || 0));
     if (stuck > 0) {
@@ -611,13 +612,6 @@ function renderStations(s) {
     }
     head.append(counts);
     station.append(head);
-
-    const ladder = el('ul', { class: 'ladder' });
-    for (const step of (s.pipelines || {})[version.label] || []) {
-      const isNew = version.label !== routing.currentLabel && !currentSteps.has(step);
-      ladder.append(el('li', { class: 'rung' + (isNew ? ' rung-new' : ''), text: step }));
-    }
-    station.append(ladder);
 
     const foot = el('div', { class: 'station-foot' });
     if (version.label === routing.currentLabel) {
@@ -701,15 +695,17 @@ function renderRail(s) {
   const all = (s.orders || []).slice().sort((a, b) => b.elapsedSec - a.elapsedSec);
   const orders = all.filter(RAIL_FILTERS[railFilter] || RAIL_FILTERS.all);
 
-  $('tickets-count').textContent = all.length
-    ? `${orders.length} of ${all.length} sampled · oldest first · ${int(s.totals.running)} in flight`
-    : '';
-
   for (const chip of document.querySelectorAll('.chip[data-filter]')) {
     chip.setAttribute('aria-pressed', String(chip.dataset.filter === railFilter));
   }
 
-  drawTickets(orders, s.pipelines || {});
+  // The count comes back from the draw, because finished orders are retired
+  // during it — counting before would claim more tickets than are on screen.
+  const shown = drawTickets(orders, s.pipelines || {});
+
+  $('tickets-count').textContent = all.length
+    ? `${shown} on the rail · oldest first · ${int(s.totals.running)} in flight`
+    : '';
 
   const stuck = s.totals.degraded || 0;
   $('rail-foot').replaceChildren(
@@ -722,23 +718,71 @@ function renderRail(s) {
   );
 }
 
+// leaveMs is how long a finished order takes to fade out. Must match the
+// .ticket-leaving animation, or the node is removed mid-fade.
+const leaveMs = 550;
+
+// retired holds orders that have finished and faded out.
+//
+// The backend keeps returning a completed order until it ages out of the
+// sampled window, so without this the ticket would be recreated on the very
+// next frame after fading away.
+const retired = new Set();
+
+// drawnOnce guards the first frame. The window already contains orders that
+// finished before the page opened, and animating a screenful of them fading
+// at once is just noise — they are retired silently instead.
+let drawnOnce = false;
+
 // drawTickets reconciles the rail by order ID rather than rebuilding it.
 //
 // Rebuilding every second destroyed and recreated every ticket, which restarts
 // the step-dot animation and throws away the DOM identity that makes an
 // individual order followable. Reusing the node keeps both: passing existing
 // nodes to replaceChildren *moves* them instead of recreating them, so a
-// ticket that survives a tick keeps its element, its position logic and its
-// running animation.
+// ticket that survives a tick keeps its element and its running animation.
 function drawTickets(orders, pipelines) {
   const container = $('tickets');
   const existing = new Map();
   for (const node of container.children) existing.set(node.dataset.orderId, node);
 
-  container.replaceChildren(...orders.map((order) => {
-    const node = existing.get(order.orderId);
-    return node ? updateTicket(node, order, pipelines) : ticket(order, pipelines);
-  }));
+  // Forget orders that have left the window, so the set cannot grow unbounded.
+  const present = new Set(orders.map((o) => o.orderId));
+  for (const id of retired) {
+    if (!present.has(id)) retired.delete(id);
+  }
+
+  const nodes = [];
+  for (const order of orders) {
+    if (retired.has(order.orderId)) continue;
+
+    // Orders that finished before this page opened never appear.
+    if (!drawnOnce && order.status === 'Completed') {
+      retired.add(order.orderId);
+      continue;
+    }
+
+    const node = existing.get(order.orderId) || ticket(order, pipelines);
+    updateTicket(node, order, pipelines);
+
+    // A finished order plays out and goes. It keeps its place in the rail
+    // while it fades, so the orders around it do not jump.
+    if (order.status === 'Completed' && !node.dataset.leaving) {
+      node.dataset.leaving = '1';
+      node.classList.add('ticket-leaving');
+      const id = order.orderId;
+      setTimeout(() => {
+        retired.add(id);
+        node.remove();
+      }, leaveMs);
+    }
+
+    nodes.push(node);
+  }
+
+  container.replaceChildren(...nodes);
+  drawnOnce = true;
+  return nodes.length;
 }
 
 function ticket(order, pipelines) {
