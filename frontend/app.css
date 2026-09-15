@@ -191,7 +191,6 @@ body {
 
 .spectrum-label { text-align: right; }
 .spectrum-label .tag { display: block; }
-.spectrum-label small { display: block; margin-top: 2px; color: var(--ink-faint); font-size: 11px; }
 
 .bar {
   display: flex; height: 40px; overflow: hidden;
