@@ -3,7 +3,10 @@
  * A pure renderer: the backend sends a complete snapshot every second over
  * Server-Sent Events, and this file draws it. There is no client-side model of
  * the world to drift out of step with the server, which matters when the thing
- * on screen is being used to make deploy decisions in front of an audience. */
+ * on screen is being used to make deploy decisions in front of an audience.
+ *
+ * The one piece of local state is which rail filter is selected, because that
+ * is a property of the viewer rather than of the system. */
 
 'use strict';
 
@@ -13,6 +16,9 @@
 const API = new URLSearchParams(location.search).get('api') || '';
 const url = (path) => API + path;
 
+// Five frequencies of the spectrum, one per version, used for nothing else.
+// Cyan means live and crimson means trouble, so neither is ever a version and
+// a version's identity can never imply its health.
 const VERSION_COLOR = {
   v1: 'var(--v1)', v2: 'var(--v2)', v3: 'var(--v3)',
   v4: 'var(--v4)', v5: 'var(--v5)',
@@ -22,6 +28,7 @@ const colorFor = (label) => VERSION_COLOR[label] || 'var(--ink-faint)';
 const $ = (id) => document.getElementById(id);
 
 let snapshot = null;
+let railFilter = 'all';
 
 /* --- Formatting --------------------------------------------------------- */
 
@@ -115,20 +122,23 @@ function link(state, text) {
 function render(next) {
   snapshot = next;
   renderReadouts(next);
-  renderSplit(next);
-  renderCapacity(next);
+  renderSpectrum(next);
+  renderLegend(next);
   renderRollout(next);
+  renderFleet(next);
   renderStations(next);
-  renderTickets(next);
+  renderRail(next);
   renderFault(next);
 }
 
 function renderReadouts(s) {
   const traffic = s.traffic;
   $('rate-actual').textContent = traffic && traffic.running ? int(traffic.ratePerMin) : '0';
-  renderAutoStop(traffic);
   $('throughput').textContent = int(s.completedPerMin);
   $('inflight').textContent = int(s.totals.running);
+  $('backlog-top').textContent = int(s.capacity.backlogDepth);
+  $('order-time').textContent = medianOrderTime(s.orders);
+  renderAutoStop(traffic);
 
   const stuck = s.totals.degraded || 0;
   $('stuck-readout').hidden = stuck === 0;
@@ -147,10 +157,22 @@ function renderReadouts(s) {
   }
 }
 
+// medianOrderTime reads the middle completed order out of the sampled strip.
+//
+// A median rather than a p99: the sample is the most recent few dozen orders,
+// which is nowhere near enough to place a tail percentile honestly.
+function medianOrderTime(orders) {
+  const done = (orders || [])
+    .filter((o) => o.status === 'Completed')
+    .map((o) => o.elapsedSec)
+    .sort((a, b) => a - b);
+  return done.length ? age(done[Math.floor(done.length / 2)]) : '—';
+}
+
 // renderAutoStop says when traffic will stop itself.
 //
 // Worth showing rather than hiding: with serverless workers, traffic left
-// running keeps invoking Lambdas, so the generator stops on its own — and an
+// running keeps invoking workers, so the generator stops on its own — and an
 // operator who does not know that would think the demo broke.
 function renderAutoStop(traffic) {
   const note = $('autostop');
@@ -161,7 +183,7 @@ function renderAutoStop(traffic) {
 
   if (traffic.autoStopped) {
     note.hidden = false;
-    note.textContent = 'Traffic stopped itself after being left untouched. Set a rate to start again.';
+    note.textContent = 'Flow stopped itself after being left untouched. Set a rate to start again.';
     return;
   }
 
@@ -173,147 +195,98 @@ function renderAutoStop(traffic) {
 
   const seconds = Math.round((stopAt - Date.now()) / 1000);
   note.hidden = seconds > 300; // only worth saying when it is close
-  if (!note.hidden) note.textContent = `Traffic stops itself in ${age(seconds)} unless you change something.`;
+  if (!note.hidden) note.textContent = `Flow stops itself in ${age(seconds)} unless you change something.`;
 }
 
-// renderSplit draws the two hero bars: where new orders are routed, and where
-// orders actually are. The gap between them is the pinning guarantee.
-function renderSplit(s) {
+// renderSpectrum draws the three hero bars.
+//
+// The gap between the first two is the pinning guarantee: new orders move on a
+// deploy, in-flight orders do not. The third is empty at rest and fills per
+// version as work arrives, which is the serverless story.
+function renderSpectrum(s) {
   const routing = s.deployment.routing || {};
-  const shares = [];
+  const versions = s.deployment.versions || [];
 
-  if (routing.currentLabel) {
-    shares.push({ label: routing.currentLabel, share: 100 - (routing.rampingPct || 0) });
-  }
-  if (routing.rampingLabel && routing.rampingPct > 0) {
-    shares.push({ label: routing.rampingLabel, share: routing.rampingPct });
-  }
-  drawBar($('split-routing'), shares, 'No version is taking orders yet', (s) => pct(s.share));
+  // Version cards already carry the effective share, which is what a traffic
+  // split rewrites — so reading them covers both routing and a hand-set split.
+  const routed = versions
+    .map((v) => ({ label: v.label, share: v.trafficPct || 0 }))
+    .filter((v) => v.share > 0);
+  drawBar($('split-routing'), routed, 'No version is taking orders yet', (x) => pct(x.share));
 
-  const inFlight = (s.deployment.versions || [])
+  const inFlight = versions
     .map((v) => ({ label: v.label, share: (s.health[v.label] || {}).running || 0 }))
     .filter((v) => v.share > 0);
-  drawBar($('split-inflight'), inFlight, 'No orders in flight', (s) => int(s.share));
+  drawBar($('split-inflight'), inFlight, 'No orders in flight', (x) => int(x.share));
 
-  // Where the workers actually are. With serverless workers this bar is empty
-  // at rest and fills per version as work arrives, so dumping orders onto an
-  // idle version visibly brings its own slice into existence.
-  const workers = (s.deployment.versions || [])
+  const workers = versions
     .map((v) => ({ label: v.label, share: v.pollers || 0 }))
     .filter((v) => v.share > 0);
-  drawBar($('split-workers'), workers, 'No workers running anywhere — nothing is provisioned until there is work',
-    (s) => int(s.share));
+  drawBar($('split-workers'), workers, 'No workers running anywhere', (x) => int(x.share));
+
+  // The shift chip names the move a live rollout is making.
+  const rollout = s.rollout;
+  const live = rollout && LIVE_PHASES.has(rollout.phase);
+  $('shift').hidden = !live;
+  if (live) {
+    $('shift-from').textContent = rollout.previousCurrentLabel || routing.currentLabel || '—';
+    $('shift-to').textContent = rollout.targetVersion;
+    $('shift-from').style.color = colorFor(rollout.previousCurrentLabel || routing.currentLabel);
+    $('shift-to').style.color = colorFor(rollout.targetVersion);
+  }
 }
 
 function drawBar(target, shares, emptyMessage, caption) {
   const total = shares.reduce((sum, s) => sum + s.share, 0);
   if (total <= 0) {
-    target.replaceChildren(el('span', { class: 'split-empty', text: emptyMessage }));
+    target.replaceChildren(el('span', { class: 'bar-empty', text: emptyMessage }));
     return;
   }
 
   target.replaceChildren(...shares.map((share) => {
-    const segment = el('div', { class: 'split-seg' });
+    const segment = el('div', { class: 'seg' });
     segment.style.background = colorFor(share.label);
     segment.style.flex = `${share.share} 1 0`;
     segment.append(
-      el('span', { class: 'split-seg-name', text: share.label }),
+      el('span', { class: 'seg-name', text: share.label }),
       el('span', { text: caption(share) }),
     );
     return segment;
   }));
 }
 
-function renderCapacity(s) {
-  const capacity = s.capacity || {};
-  $('backlog').textContent = int(capacity.backlogDepth);
-  $('pollers').textContent = int(capacity.pollers);
+// renderLegend names each version's routing role, in spectrum order.
+function renderLegend(s) {
+  const routing = s.deployment.routing || {};
+  const versions = s.deployment.versions || [];
 
-  // Zero wait is the good case and deserves to read as such, rather than as
-  // the number 0.
-  const wait = capacity.oldestWaitSec || 0;
-  $('oldest-wait').textContent = wait < 1 ? 'none' : age(wait);
+  const chips = versions.map((v) => {
+    const role = v.label === routing.currentLabel ? 'current'
+      : v.label === routing.rampingLabel ? 'ramping'
+      : v.status === 'draining' ? 'draining'
+      : v.trafficPct > 0 ? 'serving'
+      : 'idle';
 
-  // Describe what the queue is doing, not whether the workers are "keeping
-  // up". Arrival and pickup rates match exactly when a saturated queue holds
-  // steady, so a rate comparison alone would report everything as fine while
-  // orders sit waiting for minutes.
-  const added = capacity.addedPerSec || 0;
-  const taken = capacity.dispatchedPerSec || 0;
-  const queued = capacity.backlogDepth || 0;
-
-  let note = 'When work arrives faster than workers can take it, the queue grows and more workers are started.';
-  if (added > 0 || taken > 0 || queued > 0) {
-    const state = added > taken * 1.05 ? 'the backlog is growing'
-      : taken > added * 1.05 ? 'the backlog is draining'
-      : queued > 0 ? `the backlog is holding at ${int(queued)}`
-      : 'nothing is waiting for a worker';
-    note = `${added.toFixed(1)} tasks a second arriving, ${taken.toFixed(1)} picked up — ${state}.`;
-  }
-  $('capacity-note').textContent = note;
-
-  renderSyncMatch(s.syncMatch || {});
-
-  const history = s.history || {};
-  spark($('spark-backlog'), history.backlog, 'var(--v5)');
-  spark($('spark-pollers'), history.pollers, 'var(--v1)');
-  spark($('spark-wait'), history.oldestWaitSec, 'var(--v3)');
-  spark($('spark-syncmatch'), history.syncMatchPct, 'var(--v2)', 100);
-}
-
-// renderSyncMatch shows the real sync match rate: the share of tasks the
-// server handed straight to a worker that was already waiting, rather than
-// writing to the backlog first. This is the signal Temporal scales on.
-//
-// Unlike the other gauges it can be genuinely unknown — it comes from the
-// server's metrics endpoint, which may not be reachable — and saying so is
-// better than showing a confident zero.
-function renderSyncMatch(syncMatch) {
-  const gauge = $('syncmatch').closest('.gauge');
-  const known = syncMatch.ratePct >= 0;
-
-  gauge.classList.toggle('gauge-unavailable', !known);
-  $('syncmatch').textContent = known ? pct(syncMatch.ratePct) : '—';
-
-  if (!known) {
-    $('syncmatch-name').textContent = syncMatch.available
-      ? 'handed straight to a waiting worker — no tasks yet'
-      : 'handed straight to a waiting worker — server metrics unavailable';
-    return;
-  }
-
-  // Say how many tasks the figure is based on: 100% of four tasks and 100% of
-  // four hundred are not the same claim.
-  $('syncmatch-name').textContent = syncMatch.delivered > 0
-    ? `handed straight to a waiting worker, of ${int(syncMatch.delivered)} just now`
-    : 'handed straight to a waiting worker';
-}
-
-// spark draws a filled sparkline. A fixed max is passed for series that are
-// percentages, so 100% always looks like a full-height line.
-function spark(svg, series, color, fixedMax) {
-  if (!series || series.length < 2) {
-    svg.replaceChildren();
-    return;
-  }
-
-  const width = 120, height = 28;
-  const max = Math.max(fixedMax || 0, ...series, 1);
-  const points = series.map((value, i) => {
-    const x = (i / (series.length - 1)) * width;
-    const y = height - (Math.max(0, value) / max) * (height - 2) - 1;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
+    const chip = el('span', {
+      class: 'legend-chip' + (role === 'idle' ? '' : ' legend-chip-live'),
+      text: '',
+    });
+    chip.style.setProperty('--version-color', colorFor(v.label));
+    chip.append(
+      el('span', { class: 'legend-dot' }),
+      el('span', { text: `${v.label} ${role}` }),
+    );
+    return chip;
   });
 
-  const area = svgEl('polygon', {
-    class: 'spark-area',
-    points: `0,${height} ${points.join(' ')} ${width},${height}`,
-  });
-  const line = svgEl('polyline', { class: 'spark-line', points: points.join(' ') });
+  const traffic = s.traffic;
+  const inbound = traffic && traffic.running ? traffic.ratePerMin : 0;
+  chips.push(el('span', {
+    class: 'legend-total',
+    text: `total ingestion: ${int(inbound)} orders/min`,
+  }));
 
-  area.style.fill = `color-mix(in srgb, ${color} 18%, transparent)`;
-  line.style.stroke = color;
-  svg.replaceChildren(area, line);
+  $('spectrum-legend').replaceChildren(...chips);
 }
 
 const PHASE_TEXT = {
@@ -333,51 +306,50 @@ const LIVE_PHASES = new Set(['pending', 'gating', 'ramping', 'paused', 'promotin
 
 function renderRollout(s) {
   const body = $('rollout-body');
+  const controls = $('spectrum-controls');
   const rollout = s.rollout;
 
   if (!rollout || !rollout.targetVersion) {
+    controls.replaceChildren();
     body.replaceChildren(el('p', {
-      class: 'empty',
-      text: 'No deployment running. Pick a version below and start one.',
+      class: 'rollout-empty',
+      text: 'No deployment running. Pick a version below and start one, or send orders straight to any version.',
     }));
     return;
   }
 
   const live = LIVE_PHASES.has(rollout.phase);
+  controls.replaceChildren(...(live ? rolloutControls(rollout) : []));
+
   const parts = [];
 
-  const head = el('div', { class: 'rollout-head' });
+  const top = el('div', { class: 'rollout-top' });
   const target = el('span', { class: 'rollout-target', text: rollout.targetVersion });
   target.style.color = colorFor(rollout.targetVersion);
-  head.append(
+  top.append(
     target,
     el('span', {
-      class: 'rollout-phase phase-' + rollout.phase.toLowerCase(),
+      class: 'chip-phase phase-' + rollout.phase.toLowerCase(),
       text: PHASE_TEXT[rollout.phase] || rollout.phase,
     }),
   );
-  if (rollout.previousCurrentLabel) {
-    head.append(el('span', { class: 'rollout-stat-name', text: 'from ' + rollout.previousCurrentLabel }));
-  }
-  parts.push(head);
+  parts.push(top);
 
   parts.push(renderStages(rollout));
 
   if (rollout.message) {
     parts.push(el('p', {
-      class: 'rollout-message' + (BAD_PHASES.has(rollout.phase) ? ' rollout-message-bad' : ''),
+      class: 'rollout-msg' + (BAD_PHASES.has(rollout.phase) ? ' rollout-msg-bad' : ''),
       text: rollout.message,
     }));
   }
 
   parts.push(renderRolloutStats(rollout));
 
-  if (live) parts.push(renderRolloutActions(rollout));
-
   if (rollout.manualControl) {
     parts.push(el('p', {
       class: 'manual-flag',
-      text: 'You set this share by hand. It will hold here, still watching for trouble, until you continue or stop it.',
+      text: 'You set this share by hand. It holds here, still watching for trouble, until you continue or stop it.',
     }));
   }
 
@@ -407,19 +379,16 @@ function renderStages(rollout) {
   //
   // Those are not the same thing: after an operator sets a share by hand,
   // stageIndex points at the next *unrun* stage, so highlighting it showed
-  // "50% holding" while the ramp — and every other number on the panel — was
-  // at 25%.
+  // "50% holding" while the ramp — and every other number — was at 25%.
   const current = rollout.currentPct;
   const onAStage = stages.some((stage) => stage.pct === current);
 
   stages.forEach((stage) => {
     let state = '';
     if (stage.pct < current) state = 'stage-done';
-    else if (stage.pct === current && live) state = 'stage-live';
-    else if (stage.pct === current) state = 'stage-done';
+    else if (stage.pct === current) state = live ? 'stage-live' : 'stage-done';
 
     const node = el('div', { class: 'stage ' + state, text: pct(stage.pct) });
-
     if (state === 'stage-live') {
       if (rollout.holdRemainingSec > 0) {
         node.append(el('span', { class: 'stage-sub', text: age(rollout.holdRemainingSec) + ' left' }));
@@ -430,8 +399,7 @@ function renderStages(rollout) {
     rail.append(node);
   });
 
-  // An operator can set any share, not only one the plan lists. Say so rather
-  // than silently highlighting nothing.
+  // An operator can set any share, not only one the plan lists.
   if (live && !onAStage && current > 0) {
     const manual = el('div', { class: 'stage stage-live stage-manual', text: pct(current) });
     manual.append(el('span', { class: 'stage-sub', text: 'by hand' }));
@@ -450,7 +418,7 @@ function renderRolloutStats(rollout) {
     stat(pct(rollout.currentPct), 'of new orders'),
     stat(
       health.samples ? pct(health.errorRatePct) : '—',
-      health.samples ? `failed or stuck, of ${int(health.samples)} orders` : 'no orders judged yet',
+      health.samples ? `failed or stuck of ${int(health.samples)}` : 'no orders judged yet',
       bad,
     ),
   );
@@ -465,26 +433,27 @@ function renderRolloutStats(rollout) {
 }
 
 function stat(value, name, bad) {
-  const node = el('div', { class: 'rollout-stat' + (bad ? ' rollout-stat-bad' : '') });
+  const node = el('div', { class: 'stat' + (bad ? ' stat-bad' : '') });
   node.append(
-    el('span', { class: 'rollout-stat-value', text: value }),
-    el('span', { class: 'rollout-stat-name', text: name }),
+    el('span', { class: 'stat-value', text: value }),
+    el('span', { class: 'stat-name', text: name }),
   );
   return node;
 }
 
-function renderRolloutActions(rollout) {
-  const row = el('div', { class: 'rollout-actions' });
+// rolloutControls sit in the routing header, beside the bars they move.
+function rolloutControls(rollout) {
+  const nodes = [];
 
   if (rollout.phase === 'paused') {
-    row.append(button('Continue', 'btn-primary', () =>
+    nodes.push(button('Continue', 'btn-primary', () =>
       act('/api/rollout/resume', undefined, () => 'Deployment continuing')));
   } else {
-    row.append(button('Pause', '', () =>
+    nodes.push(button(`Hold ${pct(rollout.currentPct)}`, '', () =>
       act('/api/rollout/pause', undefined, () => 'Deployment paused')));
   }
 
-  row.append(button('Next stage', '', () =>
+  nodes.push(button('Next stage', '', () =>
     act('/api/rollout/advance', undefined, () => 'Moved to the next stage')));
 
   const jump = el('div', { class: 'rollout-jump' });
@@ -494,18 +463,102 @@ function renderRolloutActions(rollout) {
   jump.append(input, button('Set share', '', () =>
     act('/api/rollout/ramp', { pct: Number(input.value) },
       (state) => `Sending ${pct(state.currentPct)} of new orders to ${state.targetVersion}`)));
-  row.append(jump);
+  nodes.push(jump);
 
-  row.append(button('Stop and roll back', 'btn-danger', () =>
+  nodes.push(button(`Abort to ${rollout.previousCurrentLabel || 'current'}`, 'btn-danger', () =>
     act('/api/rollout/abort', { rollback: true }, () => 'Rolled back')));
 
-  return row;
+  return nodes;
+}
+
+function renderFleet(s) {
+  const capacity = s.capacity || {};
+  $('pollers').textContent = int(capacity.pollers);
+  $('pollers').className = 'gauge-value' + (capacity.pollers ? ' gauge-value-live' : '');
+  $('backlog').textContent = int(capacity.backlogDepth);
+
+  // Zero wait is the good case and deserves to read as such.
+  const wait = capacity.oldestWaitSec || 0;
+  $('oldest-wait').textContent = wait < 1 ? 'none' : age(wait);
+
+  renderSyncMatch(s.syncMatch || {});
+
+  // Say which way the backlog is going, in the plainest terms available.
+  // Arrival and pickup rates match exactly when a saturated queue holds
+  // steady, so a rate comparison alone would report everything as fine while
+  // orders sit waiting for minutes.
+  const added = capacity.addedPerSec || 0;
+  const taken = capacity.dispatchedPerSec || 0;
+  const queued = capacity.backlogDepth || 0;
+
+  let note = 'Nothing is provisioned until there is work. Send orders to a version and its workers appear.';
+  if (added > 0 || taken > 0 || queued > 0) {
+    const state = added > taken * 1.05 ? 'the backlog is growing'
+      : taken > added * 1.05 ? 'the backlog is draining'
+      : queued > 0 ? `the backlog is holding at ${int(queued)}`
+      : 'nothing is waiting for a worker';
+    note = `${added.toFixed(1)} tasks a second arriving, ${taken.toFixed(1)} picked up — ${state}.`;
+  }
+  $('capacity-note').textContent = note;
+
+  spark($('spark-pollers'), (s.history || {}).pollers, 'var(--cyan)');
+}
+
+// renderSyncMatch shows the real sync match rate: the share of tasks the
+// server handed straight to a worker that was already waiting. This is the
+// signal Temporal scales on.
+//
+// Unlike the other gauges it can be genuinely unknown — it comes from the
+// server's metrics endpoint — and saying so beats a confident zero.
+function renderSyncMatch(syncMatch) {
+  const known = syncMatch.ratePct >= 0;
+  const value = $('syncmatch');
+
+  value.textContent = known ? pct(syncMatch.ratePct) : '—';
+  value.className = 'gauge-value' + (known && syncMatch.ratePct >= 95 ? ' gauge-value-live' : '');
+
+  if (!known) {
+    $('syncmatch-name').textContent = syncMatch.available
+      ? 'handed straight over — no tasks yet'
+      : 'handed straight over — metrics unavailable';
+    return;
+  }
+
+  // Say how many tasks the figure is based on: 100% of four tasks and 100% of
+  // four hundred are not the same claim.
+  $('syncmatch-name').textContent = syncMatch.delivered > 0
+    ? `handed straight over, of ${int(syncMatch.delivered)}/s`
+    : 'handed straight over';
+}
+
+// spark draws a filled sparkline.
+function spark(svg, series, color) {
+  if (!series || series.length < 2) {
+    svg.replaceChildren();
+    return;
+  }
+
+  const width = 240, height = 40;
+  const max = Math.max(...series, 1);
+  const points = series.map((value, i) => {
+    const x = (i / (series.length - 1)) * width;
+    const y = height - (Math.max(0, value) / max) * (height - 3) - 1.5;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+
+  const area = svgEl('polygon', { points: `0,${height} ${points.join(' ')} ${width},${height}` });
+  const line = svgEl('polyline', { class: 'spark-line', points: points.join(' ') });
+  area.style.fill = `color-mix(in srgb, ${color} 16%, transparent)`;
+  line.style.stroke = color;
+  svg.replaceChildren(area, line);
 }
 
 function renderStations(s) {
   const routing = s.deployment.routing || {};
   const versions = s.deployment.versions || [];
   const rolloutLive = s.rollout && LIVE_PHASES.has(s.rollout.phase);
+
+  $('roster-count').textContent = `${versions.length} registered`;
 
   // Steps the current version already has: anything else a candidate runs is
   // a change worth pointing at.
@@ -514,8 +567,11 @@ function renderStations(s) {
   $('stations').replaceChildren(...versions.map((version) => {
     const health = s.health[version.label] || {};
     const stuck = health.degraded || 0;
+    const serving = version.trafficPct > 0;
 
-    const station = el('div', { class: 'station' + (stuck > 0 ? ' station-trouble' : '') });
+    const station = el('div', {
+      class: 'station' + (stuck > 0 ? ' station-trouble' : serving ? ' station-active' : ''),
+    });
     station.style.setProperty('--version-color', colorFor(version.label));
 
     const head = el('div', { class: 'station-head' });
@@ -533,8 +589,8 @@ function renderStations(s) {
     );
     head.append(share);
 
-    // Workers first: with serverless workers this is the number that tells
-    // the story, and a version at zero is the normal resting state.
+    // Workers next: with serverless workers this is the number that tells the
+    // story, and a version at zero is the normal resting state.
     const workers = el('div', { class: 'station-workers' + (version.pollers ? ' station-workers-live' : '') });
     workers.append(
       el('span', { class: 'station-workers-value', text: int(version.pollers || 0) }),
@@ -565,7 +621,7 @@ function renderStations(s) {
 
     const foot = el('div', { class: 'station-foot' });
     if (version.label === routing.currentLabel) {
-      foot.append(el('span', { class: 'station-role', text: 'Taking orders now' }));
+      foot.append(el('span', { class: 'station-role station-role-current', text: 'Taking orders now' }));
     } else {
       const start = button('Start deployment', 'btn-primary', () =>
         act('/api/rollout', { targetVersion: version.label },
@@ -574,17 +630,15 @@ function renderStations(s) {
       if (rolloutLive) start.title = 'A deployment is already running';
       foot.append(start);
     }
-    // Offered whenever a version has trouble and is not the one taking
-    // orders. It moves everything still running there, not only what is
-    // already stuck: the rest is on its way to the same broken step.
-    // Dump orders straight onto this version, whatever the routing says.
-    // Aimed at idle versions especially: they have no workers running, so the
-    // burst makes serverless workers appear from nothing.
+
+    // Send orders straight here, whatever the routing says. Aimed at idle
+    // versions especially: they have no workers running, so the burst makes
+    // serverless workers appear from nothing.
     foot.append(dumpControl(version.label));
 
     if (stuck > 0 && version.label !== routing.currentLabel) {
       const running = health.running || 0;
-      const move = button(`Move ${int(running)} orders to ${routing.currentLabel}`, '', () =>
+      const move = button(`Move ${int(running)} to ${routing.currentLabel}`, '', () =>
         act('/api/orders/recover', { version: version.label }, (data) => data.message));
       move.title = `Restart every order still running on ${version.label}, pinned to ${routing.currentLabel}`;
       foot.append(move);
@@ -595,7 +649,6 @@ function renderStations(s) {
   }));
 }
 
-// dumpControl is the per-version burst control: a count and a button.
 function dumpControl(label) {
   const row = el('div', { class: 'dump' });
 
@@ -606,7 +659,7 @@ function dumpControl(label) {
   const send = button(`Send to ${label}`, '', () =>
     act('/api/versions/dump', { version: label, count: Number(count.value) },
       () => `Sent ${int(count.value)} orders straight to ${label}`));
-  send.title = `Start ${label} orders directly, pinned to ${label}, ignoring the traffic split`;
+  send.title = `Start orders pinned to ${label}, ignoring the routing split`;
 
   row.append(count, send);
   return row;
@@ -617,7 +670,7 @@ function roleText(version) {
     case 'current': return 'taking new orders';
     case 'ramping': return 'being deployed';
     case 'draining': return 'finishing its orders';
-    default: return 'ready, idle';
+    default: return version.trafficPct > 0 ? 'serving' : 'ready, idle';
   }
 }
 
@@ -627,35 +680,91 @@ function countNode(name, value) {
   return node;
 }
 
-function renderTickets(s) {
-  const orders = s.orders || [];
-  $('tickets-count').textContent = orders.length
-    ? `most recent ${orders.length} of ${int(s.totals.running)} in flight`
+/* --- The rail ----------------------------------------------------------- */
+
+const RAIL_FILTERS = {
+  all: () => true,
+  fast: (o) => o.elapsedSec < 30,
+  mid: (o) => o.elapsedSec >= 30 && o.elapsedSec <= 60,
+  slow: (o) => o.elapsedSec > 60,
+  stuck: (o) => o.degraded,
+};
+
+function renderRail(s) {
+  const all = s.orders || [];
+  const orders = all.filter(RAIL_FILTERS[railFilter] || RAIL_FILTERS.all);
+
+  $('tickets-count').textContent = all.length
+    ? `${orders.length} of ${all.length} sampled · ${int(s.totals.running)} in flight`
     : '';
 
-  $('tickets').replaceChildren(...orders.map((order) => {
-    const done = order.status === 'Completed';
-    const ticket = el('div', {
-      class: 'ticket' + (order.degraded ? ' ticket-stuck' : '') + (done ? ' ticket-done' : ''),
-    });
-    ticket.style.setProperty('--version-color', colorFor(order.version));
+  for (const chip of document.querySelectorAll('.chip[data-filter]')) {
+    chip.setAttribute('aria-pressed', String(chip.dataset.filter === railFilter));
+  }
 
-    const top = el('div', { class: 'ticket-top' });
-    top.append(
-      el('span', { class: 'ticket-id', text: order.orderId.replace(/^ord-0*/, '#') }),
-      el('span', { class: 'ticket-version', text: order.version || '?' }),
-    );
-    ticket.append(
-      top,
-      el('div', { class: 'ticket-step', text: order.degraded ? 'stuck: ' + order.step : order.step || '—' }),
-      el('div', { class: 'ticket-age', text: done ? 'served in ' + age(order.elapsedSec) : age(order.elapsedSec) }),
-    );
-    return ticket;
-  }));
+  $('tickets').replaceChildren(...orders.map((order) => ticket(order, s.pipelines || {})));
+
+  const stuck = s.totals.degraded || 0;
+  $('rail-foot').replaceChildren(
+    el('span', { class: 'tag', text: `${int(s.totals.completed)} served` }),
+    el('span', { class: 'tag', text: `${int(s.totals.running)} in flight` }),
+    el('span', {
+      class: 'tag',
+      text: stuck ? `${int(stuck)} stuck — rescue them from the version card` : 'zero stuck orders',
+    }),
+  );
 }
 
-// renderFault keeps the fault-injection selects in step with the versions that
-// actually exist, without stamping over a selection being made.
+function ticket(order, pipelines) {
+  const done = order.status === 'Completed';
+  const node = el('div', {
+    class: 'ticket' + (order.degraded ? ' ticket-stuck' : '') + (done ? ' ticket-done' : ''),
+  });
+  node.style.setProperty('--version-color', colorFor(order.version));
+
+  const top = el('div', { class: 'ticket-top' });
+  top.append(
+    el('span', { class: 'ticket-id', text: order.orderId.replace(/^ord-0*/, '#') }),
+    el('span', { class: 'ticket-version', text: order.version || '?' }),
+  );
+  node.append(top, stepDots(order, pipelines, done));
+
+  node.append(
+    el('div', { class: 'ticket-step', text: order.degraded ? 'stuck: ' + order.step : order.step || '—' }),
+    el('div', { class: 'ticket-age', text: done ? 'served in ' + age(order.elapsedSec) : age(order.elapsedSec) }),
+  );
+  return node;
+}
+
+// stepDots draws the order's journey as one dot per step of its version's
+// pipeline, filled up to where it has got to.
+//
+// The step index is derived by finding the reported step in that version's
+// pipeline, so a v1 order shows four rungs and a v4 order seven — the shape
+// difference between versions, on every single order.
+function stepDots(order, pipelines, done) {
+  const steps = pipelines[order.version] || [];
+  const row = el('div', { class: 'ticket-steps' });
+  if (!steps.length) return row;
+
+  const at = done ? steps.length : Math.max(0, steps.indexOf(order.step));
+
+  steps.forEach((step, i) => {
+    if (i > 0) {
+      row.append(el('span', { class: 'step-link' + (i <= at ? ' step-link-done' : '') }));
+    }
+    let cls = 'step-dot';
+    if (i < at || done) cls += ' step-dot-done';
+    else if (i === at) cls += ' step-dot-live';
+    const dot = el('span', { class: cls });
+    dot.title = step;
+    row.append(dot);
+  });
+  return row;
+}
+
+// renderFault keeps the fault selects in step with the versions that actually
+// exist, without stamping over a selection being made.
 let faultVersions = '';
 
 function renderFault(s) {
@@ -715,18 +824,18 @@ function button(label, className, onClick) {
 
 /* --- Wiring ------------------------------------------------------------- */
 
-$('rate-apply').addEventListener('click', () => {
-  const rate = Number($('rate-input').value);
+function setRate(rate) {
   act('/api/traffic/rate', { ratePerMin: rate },
     () => (rate > 0 ? `Taking ${int(rate)} orders a minute` : 'Stopped taking new orders'));
-});
+}
+
+$('rate-apply').addEventListener('click', () => setRate(Number($('rate-input').value)));
 
 for (const chip of document.querySelectorAll('.chip[data-rate]')) {
   chip.addEventListener('click', () => {
     const rate = Number(chip.dataset.rate);
     $('rate-input').value = rate;
-    act('/api/traffic/rate', { ratePerMin: rate },
-      () => (rate > 0 ? `Taking ${int(rate)} orders a minute` : 'Stopped taking new orders'));
+    setRate(rate);
   });
 }
 
@@ -734,6 +843,13 @@ for (const chip of document.querySelectorAll('.chip[data-spike]')) {
   chip.addEventListener('click', () => {
     const count = Number(chip.dataset.spike);
     act('/api/traffic/spike', { count }, () => `Dumped ${int(count)} orders`);
+  });
+}
+
+for (const chip of document.querySelectorAll('.chip[data-filter]')) {
+  chip.addEventListener('click', () => {
+    railFilter = chip.dataset.filter;
+    if (snapshot) renderRail(snapshot);
   });
 }
 
