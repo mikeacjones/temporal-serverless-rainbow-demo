@@ -691,3 +691,27 @@ calls. The dashboard uses it twice: a live worker count on each version
 card that sits at zero until that version is used, and a third hero bar
 showing workers by version — empty at rest, filling per version as work
 arrives.
+
+### "Peak worker count" was not a peak
+
+The fleet panel originally carried one large sparkline labelled *peak
+worker count*. It was plotting `history.pollers` — the live worker count
+over the rolling window — and the label came from the source design
+rather than from anything being computed. A graph of current values
+titled "peak" is the same class of error as the sync-match figure that
+read 100% while a queue drained: a number presented as something it is
+not.
+
+It is now two small sparklines, one under the gauge each belongs to
+(workers running, backlog task queue), and the peak is computed for real
+from the same series and shown as a figure beside the gauge name — with
+the window it covers implied by the graph directly above it. It appears
+only when the peak actually exceeds the current value, so it never
+restates what the gauge already says.
+
+They scroll rather than redraw. Each tick the series has shifted one
+sample left, so the line is placed one sample right with no transition
+and then travelled back to zero across the tick. Recreating the nodes
+each frame would reset both that transition and the pulse on the leading
+edge, so the nodes are reused — the same reason the order tickets are
+reconciled rather than rebuilt.

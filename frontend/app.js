@@ -501,7 +501,21 @@ function renderFleet(s) {
   }
   $('capacity-note').textContent = note;
 
-  spark($('spark-pollers'), (s.history || {}).pollers, 'var(--cyan)');
+  const history = s.history || {};
+  spark($('spark-pollers'), history.pollers, 'var(--cyan)');
+  spark($('spark-backlog'), history.backlog, 'var(--v4)');
+
+  // Name the peak over the window the graph actually shows, so the figure is
+  // scoped rather than implied.
+  const peakWorkers = peakOf(history.pollers);
+  $('pollers-name').textContent = peakWorkers > (capacity.pollers || 0)
+    ? `workers running · peak ${int(peakWorkers)}`
+    : 'workers running';
+
+  const peakBacklog = peakOf(history.backlog);
+  $('backlog-name').textContent = peakBacklog > (capacity.backlogDepth || 0)
+    ? `backlog task queue · peak ${int(peakBacklog)}`
+    : 'backlog task queue';
 }
 
 // renderSyncMatch shows the real sync match rate: the share of tasks the
@@ -531,26 +545,69 @@ function renderSyncMatch(syncMatch) {
     : 'handed straight over';
 }
 
-// spark draws a filled sparkline.
+// spark draws a small scrolling sparkline.
+//
+// It reuses its nodes and slides rather than redrawing. Each tick the series
+// has shifted one sample to the left, so the line is placed one sample to the
+// right with no transition and then travelled back to zero over the tick —
+// which reads as continuous movement instead of a jump every second.
+// Recreating the nodes would reset that transition, and the pulse on the
+// leading edge, every frame.
 function spark(svg, series, color) {
   if (!series || series.length < 2) {
     svg.replaceChildren();
     return;
   }
 
-  const width = 240, height = 40;
+  const width = 120, height = 30;
   const max = Math.max(...series, 1);
+  const step = width / (series.length - 1);
+
   const points = series.map((value, i) => {
-    const x = (i / (series.length - 1)) * width;
-    const y = height - (Math.max(0, value) / max) * (height - 3) - 1.5;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
+    const x = i * step;
+    const y = height - (Math.max(0, value) / max) * (height - 4) - 2;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
   });
 
-  const area = svgEl('polygon', { points: `0,${height} ${points.join(' ')} ${width},${height}` });
-  const line = svgEl('polyline', { class: 'spark-line', points: points.join(' ') });
+  let shift = svg.querySelector('.spark-shift');
+  if (!shift) {
+    shift = svgEl('g', { class: 'spark-shift' });
+    shift.append(
+      svgEl('polygon', { class: 'spark-area' }),
+      svgEl('polyline', { class: 'spark-line' }),
+    );
+    svg.replaceChildren(shift, svgEl('circle', { class: 'spark-head', r: '2' }));
+  }
+
+  const [area, line] = shift.children;
+  area.setAttribute('points', `0,${height} ${points.join(' ')} ${width},${height}`);
+  line.setAttribute('points', points.join(' '));
   area.style.fill = `color-mix(in srgb, ${color} 16%, transparent)`;
   line.style.stroke = color;
-  svg.replaceChildren(area, line);
+
+  // The leading edge marks "now" and stays put while the line moves under it.
+  const head = svg.querySelector('.spark-head');
+  const lastY = height - (Math.max(0, series.at(-1)) / max) * (height - 4) - 2;
+  head.setAttribute('cx', String(width));
+  head.setAttribute('cy', lastY.toFixed(2));
+  head.style.fill = color;
+
+  shift.classList.remove('spark-shift-animate');
+  shift.style.transform = `translateX(${step}px)`;
+  // Force the shifted position to be applied before the transition starts,
+  // or the browser collapses both changes into one and nothing moves.
+  void shift.getBoundingClientRect();
+  shift.classList.add('spark-shift-animate');
+  shift.style.transform = 'translateX(0)';
+}
+
+// peakOf reports the highest value in the visible history window.
+//
+// This is a real peak over a known window, unlike the "peak worker count"
+// label this replaces — that was simply the live count over time, labelled as
+// something it was not.
+function peakOf(series) {
+  return series && series.length ? Math.max(...series) : 0;
 }
 
 function renderStations(s) {

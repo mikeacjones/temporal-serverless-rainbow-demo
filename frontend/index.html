@@ -147,25 +147,22 @@
     <div class="gauges">
       <div class="gauge">
         <span class="gauge-value" id="pollers">—</span>
-        <span class="gauge-name">workers running</span>
+        <span class="gauge-name" id="pollers-name">workers running</span>
+        <svg class="spark" id="spark-pollers" viewBox="0 0 120 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+      </div>
+      <div class="gauge">
+        <span class="gauge-value" id="backlog">—</span>
+        <span class="gauge-name" id="backlog-name">backlog task queue</span>
+        <svg class="spark" id="spark-backlog" viewBox="0 0 120 30" preserveAspectRatio="none" aria-hidden="true"></svg>
       </div>
       <div class="gauge">
         <span class="gauge-value" id="syncmatch">—</span>
         <span class="gauge-name" id="syncmatch-name">handed straight over</span>
       </div>
       <div class="gauge">
-        <span class="gauge-value" id="backlog">—</span>
-        <span class="gauge-name">backlog task queue</span>
-      </div>
-      <div class="gauge">
         <span class="gauge-value" id="oldest-wait">—</span>
         <span class="gauge-name">longest wait</span>
       </div>
-    </div>
-
-    <div class="fleet-spark">
-      <span class="tag">peak worker count</span>
-      <svg class="spark" id="spark-pollers" viewBox="0 0 240 40" preserveAspectRatio="none" aria-hidden="true"></svg>
     </div>
 
     <p class="panel-note" id="capacity-note"></p>
