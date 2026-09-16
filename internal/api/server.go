@@ -48,10 +48,9 @@ type Options struct {
 	// stopping itself. Zero uses the generator's own default.
 	TrafficMaxRun time.Duration
 
-	// OrderSample is how many live orders the rail shows. Zero uses the
-	// default. Raise it to watch more orders at once; the practical ceiling is
-	// how many tickets a browser can animate and a person can read, not the
-	// cost of the query, which is one page either way.
+	// OrderSample is how many live orders each version's column samples. Zero
+	// uses the default. It is per version, so one version's burst cannot push
+	// another version's orders out of view.
 	OrderSample int
 }
 
@@ -103,7 +102,7 @@ func New(opts Options) *Server {
 		opts.ControlQueue = rollout.TaskQueue
 	}
 	if opts.OrderSample <= 0 {
-		opts.OrderSample = defaultLiveOrderSample
+		opts.OrderSample = defaultOrdersPerVersion
 	}
 
 	return &Server{

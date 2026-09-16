@@ -95,6 +95,14 @@ fmt:
 lint:
 	go vet ./...
 	./deploy/local/check-frontend.sh
+	@# check-frontend catches names that do not resolve; this runs the real
+	@# renderer against a captured snapshot and catches code that resolves and
+	@# then throws, which is how a blank panel shipped more than once.
+	@if command -v node >/dev/null 2>&1; then \
+		node ./deploy/local/smoke-frontend.mjs; \
+	else \
+		echo "  (node not installed — skipping the frontend smoke test)"; \
+	fi
 
 # --- Demo controls ----------------------------------------------------------
 #

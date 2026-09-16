@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -8,6 +9,8 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/orders"
 )
 
 func record(status enumspb.WorkflowExecutionStatus) *workflowpb.WorkflowExecutionInfo {
@@ -78,5 +81,36 @@ func TestClosedOrdersStopAgeing(t *testing.T) {
 
 	if got := liveOrder(e, time.Now()).ElapsedSec; got != 8 {
 		t.Errorf("elapsed = %ds, want 8s measured to the close time", got)
+	}
+}
+
+// Each version's order sample must be scoped to that version, and to running
+// orders only.
+//
+// The version scope is what stops one version's burst emptying another's
+// column: with a single shared window, 250 orders dumped on v3 straight after
+// 250 on v2 left the sample holding 104 v3 rows and no v2 rows at all, while
+// 500 orders were running. The Running scope is what stops a column filling
+// with orders that have already finished, since at any real order rate most
+// recent orders have.
+func TestOrderSampleIsScopedPerVersionAndToRunningOrders(t *testing.T) {
+	for _, version := range []string{"v1", "v5"} {
+		q := recentOrdersQuery(version)
+
+		if !strings.Contains(q, `OrderVersion = "`+version+`"`) {
+			t.Errorf("query for %s does not scope to that version: %s", version, q)
+		}
+		if !strings.Contains(q, `ExecutionStatus = "Running"`) {
+			t.Errorf("query for %s does not scope to running orders: %s", version, q)
+		}
+		if !strings.Contains(q, orders.WorkflowTypeName) {
+			t.Errorf("query for %s does not scope to orders: %s", version, q)
+		}
+	}
+
+	// Two versions must not produce the same query, or they would share a
+	// window again by a different route.
+	if recentOrdersQuery("v1") == recentOrdersQuery("v2") {
+		t.Error("every version produced the same query")
 	}
 }
