@@ -36,7 +36,29 @@ func (t *trafficController) state(ctx context.Context) *traffic.State {
 		t.logger.Debug("cannot decode traffic state", "err", err)
 		return nil
 	}
+
+	// Same trap as the rollout: a terminated generator keeps answering with
+	// Running: true, which would leave the dashboard showing traffic that
+	// cannot be changed. Saying it is not running lets the next action start a
+	// fresh one, which is what ensure() is for.
+	if state.Running && !t.running(ctx) {
+		state.Running = false
+		state.RatePerMin = 0
+	}
+
 	return &state
+}
+
+// running reports whether the generator is still executing. An error counts as
+// running, so a read failure cannot cause a second generator to be started
+// alongside a healthy one.
+func (t *trafficController) running(ctx context.Context) bool {
+	desc, err := t.c.DescribeWorkflowExecution(ctx, traffic.WorkflowID, "")
+	if err != nil {
+		t.logger.Debug("cannot describe traffic execution", "err", err)
+		return true
+	}
+	return desc.GetWorkflowExecutionInfo().GetStatus() == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING
 }
 
 // chaos returns the live fault-injection setting, which the canary gate needs
@@ -120,6 +142,18 @@ const rolloutMaxDuration = 2 * time.Hour
 // A finished rollout still answers this Query, which is deliberate: the
 // dashboard should keep showing the outcome of the last rollout rather than
 // blanking the panel the moment it ends.
+//
+// But a Query alone cannot tell you the Workflow is dead. A terminated
+// execution stays queryable for the namespace's retention period, and its
+// handler answers with whatever state it was holding when it stopped — so a
+// rollout terminated mid-ramp reports itself as "paused" indefinitely. That
+// state looks live to everything downstream: the version cards disable their
+// deployment buttons, start() refuses with "a rollout is already in progress",
+// and every control Update fails because the execution is closed. The
+// dashboard ends up wedged, insisting a rollout is running that cannot be
+// resumed, advanced or aborted.
+//
+// So a live-looking phase is reconciled against the execution's real status.
 func (r *rolloutController) state(ctx context.Context) *rollout.State {
 	var state rollout.State
 	value, err := r.c.QueryWorkflow(ctx, rollout.WorkflowID, "", rollout.QueryGetState)
@@ -130,7 +164,46 @@ func (r *rolloutController) state(ctx context.Context) *rollout.State {
 		r.logger.Debug("cannot decode rollout state", "err", err)
 		return nil
 	}
+
+	// Only worth a second call when the answer claims to be live; a rollout
+	// that already reports a terminal phase needs no confirming.
+	if !state.Phase.Terminal() {
+		state = orphaned(state, r.running(ctx))
+	}
+
 	return &state
+}
+
+// orphaned rewrites a live-looking rollout whose coordinator has stopped.
+//
+// Kept separate and pure because the trap it handles is not obvious: the state
+// being rewritten is a truthful answer from the Workflow, just a frozen one.
+func orphaned(state rollout.State, running bool) rollout.State {
+	if running {
+		return state
+	}
+
+	was := state.Phase
+	state.Phase = rollout.PhaseAborted
+	state.HoldRemainingSec = 0
+	state.Message = fmt.Sprintf(
+		"stopped outside the dashboard — the coordinator for %s is no longer running, and its last state was %q",
+		state.TargetVersion, was)
+	return state
+}
+
+// running reports whether the rollout coordinator is still executing.
+//
+// Treats an error as "still running": a failed Describe is a read problem, and
+// wrongly declaring a live rollout dead would let a second one start alongside
+// it.
+func (r *rolloutController) running(ctx context.Context) bool {
+	desc, err := r.c.DescribeWorkflowExecution(ctx, rollout.WorkflowID, "")
+	if err != nil {
+		r.logger.Debug("cannot describe rollout execution", "err", err)
+		return true
+	}
+	return desc.GetWorkflowExecutionInfo().GetStatus() == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING
 }
 
 // start begins a rollout, refusing to start a second one alongside a live one.
