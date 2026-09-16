@@ -2,6 +2,7 @@ package api
 
 import (
 	"testing"
+	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
 )
@@ -73,5 +74,17 @@ func TestFaultRepairFiresOnlyWhenNeeded(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s: repair = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// The sparklines must cover long enough to show a spike's tail.
+//
+// History used to be sampled once per poll, so at a 1s poll the graphs held
+// two minutes — less than the tail of a large spike, which made the backlog
+// graph look empty minutes after a peak that had simply scrolled off.
+func TestHistoryWindowOutlivesASpike(t *testing.T) {
+	window := time.Duration(historyLength) * historySample
+	if window < 8*time.Minute {
+		t.Errorf("history covers only %s; a spike's tail outlives that", window)
 	}
 }

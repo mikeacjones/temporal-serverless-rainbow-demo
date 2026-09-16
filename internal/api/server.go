@@ -66,9 +66,11 @@ type Server struct {
 	traffic  *trafficController
 	rollouts *rolloutController
 
-	// lastReconcile throttles the fault repair. Touched only by the poll
-	// goroutine, so it needs no lock.
+	// lastReconcile throttles the fault repair, and lastHistory paces the
+	// sparkline samples. Touched only by the poll goroutine, so neither needs
+	// a lock.
 	lastReconcile time.Time
+	lastHistory   time.Time
 
 	allowedOrigin string
 

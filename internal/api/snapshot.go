@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/config"
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/deploy"
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/metrics"
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/orders"
@@ -29,6 +30,18 @@ const defaultLiveOrderSample = 150
 // historyLength is how many samples the sparklines keep — at a one-second
 // poll, about two minutes of history.
 const historyLength = 120
+
+// historySample is how often a point is added to the sparklines, independent
+// of how often the live numbers are refreshed.
+//
+// These were the same thing, which made the graphs useless for the event they
+// exist to show: at a 1s poll, 120 points is two minutes, and the tail of a
+// five-thousand-order spike outlives that easily. The backlog graph would look
+// empty minutes after a spike whose peak had simply scrolled off the end.
+//
+// Sampling the history more slowly than the readouts keeps the payload the
+// same size while covering ten minutes instead of two.
+var historySample = config.EnvDuration("HISTORY_SAMPLE", 5*time.Second)
 
 // Snapshot is everything the dashboard draws, in one object.
 //
@@ -290,9 +303,13 @@ func (s *Server) build(ctx context.Context) *Snapshot {
 	attachWorkers(snapshot)
 	applySplit(snapshot)
 
-	s.history.push(snapshot.Capacity, snapshot.Totals, snapshot.CompletedPerMin, snapshot.SyncMatch.RatePct)
-	// After attachWorkers, so each version's count is the one just read.
-	s.history.pushVersions(snapshot.Deployment.Versions)
+	// Only the poll goroutine reaches here, so the timestamp needs no lock.
+	if snapshot.Now.Sub(s.lastHistory) >= historySample {
+		s.lastHistory = snapshot.Now
+		s.history.push(snapshot.Capacity, snapshot.Totals, snapshot.CompletedPerMin, snapshot.SyncMatch.RatePct)
+		// After attachWorkers, so each version's count is the one just read.
+		s.history.pushVersions(snapshot.Deployment.Versions)
+	}
 	snapshot.History = *s.history
 
 	return snapshot
