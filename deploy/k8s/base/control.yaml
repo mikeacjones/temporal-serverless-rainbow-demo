@@ -33,9 +33,17 @@ spec:
               valueFrom:
                 secretKeyRef: { name: temporal, key: api-key, optional: true }
             - { name: LOG_FORMAT, value: json }
+          # A spike is 500 concurrent StartWorkflowExecution calls per batch
+          # Activity, each one a TLS gRPC round trip. At a 100m request this
+          # pod is scheduled 0.1 of a core, so under node contention the
+          # batch slowed past its heartbeat timeout and orders were dropped
+          # client-side while the server was answering starts in 14ms.
+          #
+          # No CPU limit on purpose: bursting is exactly what this pod does,
+          # and a limit would reintroduce the throttling by another route.
           resources:
-            requests: { cpu: 100m, memory: 64Mi }
-            limits: { memory: 256Mi }
+            requests: { cpu: 500m, memory: 128Mi }
+            limits: { memory: 512Mi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

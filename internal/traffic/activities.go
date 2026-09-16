@@ -82,12 +82,35 @@ func (a *Activities) StartOrders(ctx context.Context, req StartOrdersRequest) (S
 		gap = req.SpreadOver / time.Duration(req.Count)
 	}
 
-	// Heartbeat so a paced batch is visibly alive, and so cancellation (an
-	// operator changing the rate mid-window) reaches us promptly.
-	heartbeat := time.NewTicker(5 * time.Second)
-	defer heartbeat.Stop()
-
-	started := func(n int) { activity.RecordHeartbeat(ctx, n) }
+	// Heartbeat for the whole batch, from its own goroutine.
+	//
+	// This used to be a non-blocking ticker check inside the spawn loop, which
+	// meant it stopped the moment the last order was *spawned* — and a spike
+	// spends nearly all its time after that, waiting on wg.Wait(). A batch
+	// that took longer than the heartbeat timeout was killed mid-flight, and
+	// every start still in flight failed with "context deadline exceeded".
+	// Observed on the cloud environment: 26 to 46 of every 500 orders lost,
+	// with the server reporting a p99 StartWorkflowExecution latency of 44ms
+	// and no rate limiting at all.
+	heartbeatDone := make(chan struct{})
+	defer close(heartbeatDone)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				mu.Lock()
+				n := result.Started
+				mu.Unlock()
+				activity.RecordHeartbeat(ctx, n)
+			}
+		}
+	}()
 
 	for i := range req.Count {
 		seq := req.FirstSeq + i
@@ -100,12 +123,6 @@ func (a *Activities) StartOrders(ctx context.Context, req StartOrdersRequest) (S
 				wg.Wait()
 				return result, nil
 			}
-		}
-
-		select {
-		case <-heartbeat.C:
-			started(result.Started)
-		default:
 		}
 
 		wg.Add(1)

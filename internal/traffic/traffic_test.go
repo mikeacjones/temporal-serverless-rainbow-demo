@@ -1,6 +1,8 @@
 package traffic
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,5 +63,45 @@ func TestWindowIsLongEnoughToBeCheap(t *testing.T) {
 	// pacing inside the Activity is to keep this small.
 	if Window < 10*time.Second {
 		t.Errorf("Window is %s: short windows put the action cost back", Window)
+	}
+}
+
+// A spike's Activity must keep heartbeating while it waits for starts to
+// finish, not only while it is spawning them.
+//
+// The spawn phase is the fast part: with no pacing, hundreds of goroutines are
+// launched almost instantly and then the Activity sits in wg.Wait(). When the
+// heartbeat lived inside the spawn loop it stopped there, so any batch slower
+// than the heartbeat timeout was killed and every start still in flight failed
+// with "context deadline exceeded".
+//
+// This asserts the shape that caused it cannot come back: heartbeats are
+// recorded from a goroutine whose lifetime is the whole Activity.
+func TestStartOrdersHeartbeatsForTheWholeBatch(t *testing.T) {
+	src, err := os.ReadFile("activities.go")
+	if err != nil {
+		t.Fatalf("read activities.go: %v", err)
+	}
+	body := string(src)
+
+	fn := body[strings.Index(body, "func (a *Activities) StartOrders("):]
+	spawn := strings.Index(fn, "for i := range req.Count {")
+	wait := strings.Index(fn, "wg.Wait()")
+	if spawn < 0 || wait < 0 {
+		t.Fatal("cannot locate the spawn loop and the wait in StartOrders")
+	}
+
+	// The heartbeat must be started before the spawn loop, so it covers the
+	// wait that follows it.
+	hb := strings.Index(fn, "activity.RecordHeartbeat")
+	if hb < 0 {
+		t.Fatal("StartOrders records no heartbeat at all")
+	}
+	if hb > spawn && hb < wait {
+		t.Error("the heartbeat is recorded inside the spawn loop, so it stops " +
+			"before the Activity starts waiting — the batch will be killed mid-flight")
+	}
+	if !strings.Contains(fn[:spawn], "go func()") {
+		t.Error("no heartbeat goroutine is started before the spawn loop")
 	}
 }
