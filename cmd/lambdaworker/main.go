@@ -68,10 +68,10 @@ func main() {
 		// shows. A demo about elastic scale must not hide its own signal.
 		opts.WorkerOptions.DisableEagerActivities = true
 
-		opts.WorkerOptions.MaxConcurrentActivityExecutionSize =
-			config.EnvInt("WORKER_MAX_CONCURRENT_ACTIVITIES", 5)
-		opts.WorkerOptions.MaxConcurrentWorkflowTaskExecutionSize =
-			config.EnvInt("WORKER_MAX_CONCURRENT_WORKFLOW_TASKS", 5)
+		// Pollers follow demand, and slots stay as lambdaworker set them
+		// unless the environment overrides them. See tuning.go for why the
+		// fixed poller counts have to be cleared first.
+		tuneWorker(&opts.WorkerOptions)
 
 		orders.Register(opts, version, profile)
 		return nil

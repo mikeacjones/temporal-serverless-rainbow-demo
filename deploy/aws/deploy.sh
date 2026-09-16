@@ -49,6 +49,12 @@ MEMORY=${MEMORY:-512}
 # competing for CPU.
 WORKER_ACTIVITIES=${WORKER_ACTIVITIES:-20}
 
+# Slots are only reachable if something fetches tasks fast enough to fill them.
+# lambdaworker pins activity pollers at 1, so the worker autoscales its pollers
+# instead (see cmd/lambdaworker/tuning.go). Settable here so the ceiling can be
+# retuned from a deploy rather than a rebuild.
+WORKER_MAX_POLLERS=${WORKER_MAX_POLLERS:-10}
+
 # Reserved concurrency is NOT set by default, on purpose.
 #
 # It looks like a safety guardrail and behaves like a throttle: reserving 100
@@ -100,6 +106,7 @@ for version in $VERSIONS; do
   env_vars+=",ORDER_VERSION=$version"
   env_vars+=",ORDER_PROFILE=$ORDER_PROFILE"
   env_vars+=",WORKER_MAX_CONCURRENT_ACTIVITIES=$WORKER_ACTIVITIES"
+  env_vars+=",WORKER_MAX_POLLERS=$WORKER_MAX_POLLERS"
   [[ -n "${TEMPORAL_API_KEY_SECRET_ARN:-}" ]] && env_vars+=",TEMPORAL_API_KEY_SECRET_ARN=$TEMPORAL_API_KEY_SECRET_ARN"
   [[ -n "${TEMPORAL_API_KEY:-}" ]] && env_vars+=",TEMPORAL_API_KEY=$TEMPORAL_API_KEY"
 
