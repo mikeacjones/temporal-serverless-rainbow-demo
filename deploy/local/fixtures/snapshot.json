@@ -1,0 +1,544 @@
+{
+ "now": "2026-09-16T19:07:03.277987714Z",
+ "deployment": {
+  "deploymentName": "rainbow-orders",
+  "routing": {
+   "currentBuildId": "v4",
+   "currentLabel": "v4",
+   "rampingBuildId": "",
+   "rampingLabel": "",
+   "rampingPct": 0
+  },
+  "versions": [
+   {
+    "label": "v1",
+    "buildId": "v1",
+    "status": "draining",
+    "trafficPct": 20,
+    "createTime": "2026-09-15T18:28:10.727515427Z",
+    "workers": 1
+   },
+   {
+    "label": "v2",
+    "buildId": "v2",
+    "status": "idle",
+    "trafficPct": 20,
+    "createTime": "2026-09-15T18:28:10.258485385Z",
+    "workers": 1
+   },
+   {
+    "label": "v3",
+    "buildId": "v3",
+    "status": "draining",
+    "trafficPct": 20,
+    "createTime": "2026-09-15T18:28:10.18896526Z",
+    "workers": 1
+   },
+   {
+    "label": "v4",
+    "buildId": "v4",
+    "status": "current",
+    "trafficPct": 20,
+    "createTime": "2026-09-15T18:28:10.477416802Z",
+    "workers": 1
+   },
+   {
+    "label": "v5",
+    "buildId": "v5",
+    "status": "draining",
+    "trafficPct": 20,
+    "createTime": "2026-09-15T18:28:10.336989177Z",
+    "workers": 1
+   }
+  ]
+ },
+ "totals": {
+  "running": 397,
+  "completed": 11754,
+  "failed": 0,
+  "degraded": 7
+ },
+ "capacity": {
+  "backlogDepth": 338,
+  "oldestWaitSec": 22.743866913,
+  "addedPerSec": 48.404940605163574,
+  "dispatchedPerSec": 46.66954278945923,
+  "pollers": 5,
+  "pollersByBuild": {
+   "v1": 1,
+   "v2": 1,
+   "v3": 1,
+   "v4": 1,
+   "v5": 1
+  },
+  "workers": 5,
+  "workersByBuild": {
+   "v1": 1,
+   "v2": 1,
+   "v3": 1,
+   "v4": 1,
+   "v5": 1
+  }
+ },
+ "syncMatch": {
+  "ratePct": 70.49645390070923,
+  "delivered": 2820,
+  "available": true
+ },
+ "orders": [
+  {
+   "orderId": "ord-000671",
+   "version": "v4",
+   "step": "Received",
+   "status": "Completed",
+   "degraded": false,
+   "elapsedSec": 0,
+   "done": true
+  },
+  {
+   "orderId": "ord-000670",
+   "version": "v4",
+   "step": "Received",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 0,
+   "done": false
+  },
+  {
+   "orderId": "ord-000668",
+   "version": "v4",
+   "step": "Received",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 0,
+   "done": false
+  },
+  {
+   "orderId": "ord-000669",
+   "version": "v3",
+   "step": "Received",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 0,
+   "done": false
+  },
+  {
+   "orderId": "ord-000659",
+   "version": "v3",
+   "step": "Fraud check",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 2,
+   "done": false
+  },
+  {
+   "orderId": "ord-000653",
+   "version": "v3",
+   "step": "Payment",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 3,
+   "done": false
+  },
+  {
+   "orderId": "ord-000667",
+   "version": "v1",
+   "step": "Received",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 0,
+   "done": false
+  },
+  {
+   "orderId": "ord-000661",
+   "version": "v1",
+   "step": "Payment",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 2,
+   "done": false
+  },
+  {
+   "orderId": "ord-000660",
+   "version": "v1",
+   "step": "Payment",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 2,
+   "done": false
+  },
+  {
+   "orderId": "ord-000635",
+   "version": "v2",
+   "step": "Payment",
+   "status": "Running",
+   "degraded": true,
+   "elapsedSec": 7,
+   "done": false
+  },
+  {
+   "orderId": "ord-000631",
+   "version": "v2",
+   "step": "Payment",
+   "status": "Running",
+   "degraded": true,
+   "elapsedSec": 8,
+   "done": false
+  },
+  {
+   "orderId": "ord-000665",
+   "version": "v2",
+   "step": "Received",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 1,
+   "done": false
+  },
+  {
+   "orderId": "ord-000658",
+   "version": "v2",
+   "step": "Payment",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 2,
+   "done": false
+  },
+  {
+   "orderId": "ord-000652",
+   "version": "v2",
+   "step": "Payment",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 3,
+   "done": false
+  },
+  {
+   "orderId": "ord-000663",
+   "version": "v5",
+   "step": "Payment",
+   "status": "Terminated",
+   "degraded": false,
+   "elapsedSec": 1,
+   "done": true
+  },
+  {
+   "orderId": "ord-000655",
+   "version": "v5",
+   "step": "Payment",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 3,
+   "done": false
+  },
+  {
+   "orderId": "ord-000654",
+   "version": "v5",
+   "step": "Loyalty accrual",
+   "status": "Running",
+   "degraded": false,
+   "elapsedSec": 3,
+   "done": false
+  },
+  {
+   "orderId": "ord-999999",
+   "version": "",
+   "step": "",
+   "status": "Running",
+   "degraded": false,
+   "done": false,
+   "elapsedSec": 0
+  }
+ ],
+ "health": {
+  "v1": {
+   "buildId": "v1",
+   "running": 8,
+   "completed": 400,
+   "failed": 0,
+   "degraded": 0,
+   "samples": 400,
+   "errorRatePct": 0
+  },
+  "v2": {
+   "buildId": "v2",
+   "running": 18,
+   "completed": 825,
+   "failed": 0,
+   "degraded": 6,
+   "samples": 831,
+   "errorRatePct": 0.7220216606498195
+  },
+  "v3": {
+   "buildId": "v3",
+   "running": 6,
+   "completed": 574,
+   "failed": 0,
+   "degraded": 0,
+   "samples": 574,
+   "errorRatePct": 0
+  },
+  "v4": {
+   "buildId": "v4",
+   "running": 359,
+   "completed": 7030,
+   "failed": 0,
+   "degraded": 0,
+   "samples": 7030,
+   "errorRatePct": 0
+  },
+  "v5": {
+   "buildId": "v5",
+   "running": 12,
+   "completed": 2914,
+   "failed": 0,
+   "degraded": 0,
+   "samples": 2914,
+   "errorRatePct": 0
+  }
+ },
+ "traffic": {
+  "ratePerMin": 300,
+  "chaos": {
+   "spec": {
+    "targetVersion": "v2",
+    "step": "Payment",
+    "mode": "fail"
+   },
+   "pct": 100
+  },
+  "running": true,
+  "started": 300,
+  "nextSeq": 750,
+  "pendingSpike": 0,
+  "lastSpike": 0,
+  "updatedAt": "2026-09-16T19:06:48.841312263Z",
+  "split": [
+   {
+    "version": "v1",
+    "pct": 20
+   },
+   {
+    "version": "v2",
+    "pct": 20
+   },
+   {
+    "version": "v3",
+    "pct": 20
+   },
+   {
+    "version": "v4",
+    "pct": 20
+   },
+   {
+    "version": "v5",
+    "pct": 20
+   }
+  ],
+  "stopAt": "2026-09-16T19:26:48.841312263Z",
+  "autoStopped": false
+ },
+ "rollout": {
+  "targetVersion": "v4",
+  "targetBuildId": "v4",
+  "phase": "completed",
+  "stages": [
+   {
+    "pct": 50,
+    "hold": 10000000000
+   },
+   {
+    "pct": 100,
+    "hold": 10000000000
+   }
+  ],
+  "stageIndex": 2,
+  "currentPct": 100,
+  "holdRemainingSec": 0,
+  "manualControl": false,
+  "gate": {
+   "ran": true,
+   "passed": true,
+   "probes": 3,
+   "failures": 0,
+   "orderIds": [
+    "gate-v4-01a0aa0b-01",
+    "gate-v4-01a0aa0b-02",
+    "gate-v4-01a0aa0b-03"
+   ],
+   "detail": "3/3 canary orders completed on v4"
+  },
+  "health": {
+   "buildId": "v4",
+   "running": 0,
+   "completed": 0,
+   "failed": 0,
+   "degraded": 0,
+   "samples": 0,
+   "errorRatePct": 0
+  },
+  "policy": {
+   "maxErrorRatePct": 20,
+   "minSamples": 5,
+   "evalInterval": 10000000000
+  },
+  "previousCurrentLabel": "v3",
+  "message": "v4 is now current",
+  "startedAt": "2026-09-16T11:47:40.13219546Z",
+  "updatedAt": "2026-09-16T11:48:08.257969625Z"
+ },
+ "completedPerMin": 441.2368444296632,
+ "history": {
+  "backlog": [
+   341,
+   341,
+   341,
+   341,
+   338,
+   338,
+   338,
+   338
+  ],
+  "workers": [
+   5,
+   5,
+   5,
+   5,
+   5,
+   5,
+   5,
+   5
+  ],
+  "running": [
+   415,
+   415,
+   411,
+   409,
+   407,
+   406,
+   403,
+   397
+  ],
+  "completedPerMin": [
+   126.7022614747172,
+   183.216022986357,
+   241.63958668839933,
+   240.96657269969455,
+   180.24305203204506,
+   210.5889395806533,
+   225.28410556554692,
+   441.2368444296632
+  ],
+  "oldestWaitSec": [
+   21.988231288,
+   21.988231288,
+   21.988231288,
+   21.988231288,
+   22.743866913,
+   22.743866913,
+   22.743866913,
+   22.743866913
+  ],
+  "syncMatchPct": [
+   64.96097137901128,
+   64.96097137901128,
+   70.49645390070923,
+   70.49645390070923,
+   70.49645390070923,
+   70.49645390070923,
+   70.49645390070923,
+   70.49645390070923
+  ],
+  "workersByVersion": {
+   "v1": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "v2": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "v3": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "v4": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "v5": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ]
+  }
+ },
+ "pipelines": {
+  "v1": [
+   "Received",
+   "Payment",
+   "Prep",
+   "Handoff"
+  ],
+  "v2": [
+   "Received",
+   "Payment",
+   "Loyalty accrual",
+   "Prep",
+   "Handoff"
+  ],
+  "v3": [
+   "Received",
+   "Fraud check",
+   "Payment",
+   "Loyalty accrual",
+   "Prep",
+   "Handoff"
+  ],
+  "v4": [
+   "Received",
+   "Fraud check",
+   "Payment",
+   "Loyalty accrual",
+   "Prep",
+   "Mobile pickup dispatch",
+   "Handoff"
+  ],
+  "v5": [
+   "Received",
+   "Payment",
+   "Loyalty accrual",
+   "Prep",
+   "Drive-thru handoff"
+  ]
+ },
+ "viewers": 0
+}

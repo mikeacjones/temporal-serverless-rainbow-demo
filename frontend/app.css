@@ -481,56 +481,109 @@ select { width: 100%; }
 .rail-count { color: var(--ink-faint); font: 500 11px/15px var(--mono); letter-spacing: 0.04em; }
 .rail-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
 
-.tickets { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 8px; }
+/* One column per version, on the same grid as the version cards above so a
+ * column sits under the version it belongs to. */
+.order-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(226px, 1fr));
+  gap: var(--gutter);
+  align-items: start;
+}
 
-.ticket {
-  padding: 9px 11px 10px;
+.order-col { display: flex; flex-direction: column; min-width: 0; }
+
+.order-col-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 0 2px 7px;
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: 8px;
+}
+.order-col-name {
+  font: 600 15px/1 var(--display); color: var(--version-color);
+}
+.order-col-count { font-size: 11px; color: var(--ink-dim); letter-spacing: 0.04em; }
+
+/* The stack itself. Margin rather than gap, because gap cannot be animated
+ * and the collapse of a leaving ticket's own box is what pulls the orders
+ * below it upwards. */
+.order-stack { display: flex; flex-direction: column; min-height: 4px; }
+
+.otick {
+  --otick-h: 42px;
+  box-sizing: border-box;
+  max-height: var(--otick-h);
+  margin-bottom: 5px;
+  padding: 5px 8px;
+  overflow: hidden;
   background: color-mix(in srgb, var(--surface-low) 80%, transparent);
   border: 1px solid var(--hairline);
   border-left: 2px solid var(--version-color);
   border-radius: var(--radius-lg);
+  /* Transitioned, not keyframed: the ticket has to animate *to* zero height
+   * so its neighbours slide up rather than snapping into the gap. */
+  transition:
+    max-height 360ms cubic-bezier(0.4, 0, 0.2, 1),
+    margin-bottom 360ms cubic-bezier(0.4, 0, 0.2, 1),
+    padding 360ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 260ms ease-out,
+    transform 260ms ease-out,
+    border-color 200ms ease-out;
 }
-.ticket-stuck { border-color: color-mix(in srgb, var(--trouble) 40%, transparent); border-left-color: var(--trouble); }
 
-/* Started, but no worker has picked it up yet, so it has not reported which
- * version it is on. Muted rather than alarming: it is queued, not broken. */
-.ticket[data-shown-version=""] .ticket-version,
-.ticket[data-shown-version=""] .ticket-step { color: var(--ink-faint); }
-
-/* An empty slot holds its place so nothing shifts when an order finishes. */
-.ticket-slot {
-  border: 1px dashed var(--hairline);
-  border-radius: var(--radius-lg);
-  min-height: 78px;
+/* Arrivals fade in from the bottom, so a new order reads as having joined
+ * the back of the queue rather than appearing fully formed. */
+@keyframes otickArrive {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
 }
-.ticket-slot-hidden { border-style: none; }
+.otick-arriving { animation: otickArrive 220ms ease-out; }
 
-/* A finished order plays out and leaves, rather than sitting greyed out
- * occupying a slot. It keeps its place in the rail while it fades so the
- * orders around it do not jump. */
-.ticket-leaving {
-  animation: ticketLeave 550ms cubic-bezier(0.4, 0, 1, 1) forwards;
+.otick-stuck {
+  border-color: color-mix(in srgb, var(--trouble) 40%, transparent);
+  border-left-color: var(--trouble);
+  background: color-mix(in srgb, var(--trouble) 7%, transparent);
+}
+
+/* Leaving: flash to the live colour, then collapse to nothing. */
+.otick-leaving {
+  max-height: 0;
+  margin-bottom: 0;
+  padding-top: 0; padding-bottom: 0;
+  opacity: 0;
+  transform: translateX(8px);
+  border-left-color: var(--cyan);
   pointer-events: none;
 }
 
-@keyframes ticketLeave {
-  0%   { opacity: 1; transform: scale(1); }
-  30%  { opacity: 0.85; border-left-color: var(--cyan); }
-  100% { opacity: 0; transform: scale(0.94); }
+.otick-row { display: flex; align-items: center; gap: 6px; justify-content: space-between; }
+.otick-id { font: 500 11px/15px var(--mono); color: var(--ink); }
+.otick-age { font: 500 10px/14px var(--mono); color: var(--ink-dim); }
+.otick-step {
+  font-size: 10px; color: var(--ink-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.otick-steps { display: flex; align-items: center; gap: 2px; flex: none; }
+.otick-stuck .otick-step { color: var(--trouble); }
+
+.order-col-more {
+  font-size: 10px; color: var(--ink-faint);
+  padding: 3px 2px 0; letter-spacing: 0.04em;
+}
+.order-col-empty {
+  font-size: 10px; color: var(--ink-faint);
+  padding: 6px 2px; letter-spacing: 0.04em;
 }
 
-/* Removal is driven by a timer, so with motion reduced the ticket simply
- * dims for the same interval and then goes. */
+/* Removal is driven by a timer, so with motion reduced the ticket dims for
+ * the same interval and then goes. */
 @media (prefers-reduced-motion: reduce) {
-  .ticket-leaving { opacity: 0.35; }
+  .otick { transition: opacity 200ms linear; }
+  .otick-leaving { max-height: 0; opacity: 0; transform: none; }
+  .otick-arriving { animation: none; }
 }
 
-.ticket-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.ticket-id { font: 500 11px/15px var(--mono); letter-spacing: 0.04em; color: var(--ink-faint); }
-.ticket-version { font: 700 14px/1 var(--display); color: var(--version-color); }
 
 /* Step dots: the order's journey, one rung per step. */
-.ticket-steps { display: flex; align-items: center; gap: 0; margin: 9px 0 7px; }
 .step-dot {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--surface-highest);
@@ -543,7 +596,7 @@ select { width: 100%; }
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--version-color) 60%, transparent);
   animation: stepPing 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
 }
-.ticket-stuck .step-dot-live { background: var(--trouble); animation: none; box-shadow: 0 0 8px rgba(239, 68, 68, 0.6); }
+.otick-stuck .step-dot-live { background: var(--trouble); animation: none; box-shadow: 0 0 8px rgba(239, 68, 68, 0.6); }
 .step-link { flex: 1 1 auto; height: 1px; background: var(--surface-highest); min-width: 3px; }
 .step-link-done { background: color-mix(in srgb, var(--version-color) 45%, transparent); }
 
@@ -553,9 +606,6 @@ select { width: 100%; }
   100% { transform: scale(0.92); box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
 }
 
-.ticket-step { font: 500 12px/16px var(--mono); letter-spacing: 0.02em; }
-.ticket-stuck .ticket-step { color: var(--trouble); }
-.ticket-age { margin-top: 3px; font: 400 10px/14px var(--mono); letter-spacing: 0.05em; color: var(--ink-faint); }
 
 .rail-foot {
   display: flex; gap: 8px; flex-wrap: wrap; align-items: center;

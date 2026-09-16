@@ -136,7 +136,7 @@ function render(next) {
     ['deployment', renderRollout],
     ['fleet', renderFleet],
     ['versions', renderStations],
-    ['rail', renderRail],
+    ['orders', renderColumns],
     ['faults', renderFault],
   ]) {
     try {
@@ -814,7 +814,13 @@ const RAIL_FILTERS = {
   stuck: (o) => o.degraded,
 };
 
-function renderRail(s) {
+// renderColumns draws one stack of in-flight orders per version.
+//
+// A column per version, rather than one shared rail, is what makes the demo
+// legible: five stacks in five colours, each the depth of its own version's
+// work, and a stuck version turns red in isolation instead of its orders being
+// scattered through a single grid.
+function renderColumns(s) {
   const all = s.orders || [];
   const filter = RAIL_FILTERS[railFilter] || RAIL_FILTERS.all;
 
@@ -822,12 +828,16 @@ function renderRail(s) {
     chip.setAttribute('aria-pressed', String(chip.dataset.filter === railFilter));
   }
 
-  // The count comes back from the draw: seating, retiring and filtering all
-  // happen there, so counting beforehand would claim more than is on screen.
-  const shown = drawTickets(all, s.pipelines || {}, filter);
+  const shown = drawColumns(s, all, filter);
 
+  // Orders with no version yet are counted rather than seated. The Workflow
+  // publishes its version on its first Workflow Task, so an order that has
+  // been started but not yet picked up belongs to no column — and under a
+  // backlog that number is the interesting one.
+  const waiting = all.filter((o) => !o.done && !o.version).length;
   $('tickets-count').textContent = all.length
-    ? `${shown} on the rail · ${int(s.totals.running)} in flight`
+    ? `${shown} shown · ${int(s.totals.running)} in flight` +
+      (waiting ? ` · ${waiting} waiting for a worker` : '')
     : '';
 
   const stuck = s.totals.degraded || 0;
@@ -841,172 +851,190 @@ function renderRail(s) {
   );
 }
 
-// leaveMs is how long a finished order takes to fade out. Must match the
-// .ticket-leaving animation, or the node is removed mid-fade.
-const leaveMs = 550;
-
-// The rail seats each order in a slot it keeps for its whole life.
+// leaveMs is how long a finished order takes to collapse out of its column.
 //
-// Ordering by age did not work: elapsedSec is whole seconds, so dozens of
-// orders tie, and among ties the sort falls back to the order the backend
-// listed them in — which churns as the window slides. Tickets shuffled every
-// second even though the sort was doing what it was asked.
-//
-// Slots remove ordering from the equation. An order is seated once, stays in
-// that position until it finishes, fades in place, and only then frees the
-// slot for the next arrival. Nothing else moves.
-const slots = [];              // slot index -> order ID, or null when free
-const seatedNodes = new Map(); // order ID -> its element
+// It must outlast the .otick-leaving transition. Remove the node any sooner
+// and the orders below it jump into the gap instead of sliding up, which is
+// the whole point of animating the exit: one order leaving a stack of
+// identical-looking orders is invisible unless the rest visibly move.
+const leaveMs = 420;
 
-// retired holds orders that have finished and faded out.
+// columnMax caps how many tickets one column draws.
+//
+// A single version can hold a hundred orders in flight, which would run off
+// the bottom of the page. The *oldest* are kept, because those are the ones
+// about to finish, so the movement stays at the top of the stack where the eye
+// already is.
+const columnMax = 14;
+
+const seatedNodes = new Map(); // order ID -> its ticket element
+const columnNodes = new Map(); // version label -> its column parts
+
+// retired holds orders that have finished and collapsed away.
 //
 // The backend keeps returning a completed order until it ages out of the
-// sampled window, so without this the ticket would be reseated on the very
-// next frame after fading away.
+// sampled window, so without this the ticket would be reseated on the frame
+// after it left.
 const retired = new Set();
 
 // drawnOnce guards the first frame. The window already contains orders that
-// finished before the page opened, and animating a screenful of them fading
-// at once is just noise — they are retired silently instead.
+// finished before the page opened, and collapsing a screenful of them at once
+// is noise — they are retired silently instead.
 let drawnOnce = false;
 
-// drawTickets seats arrivals, updates what is seated, and clears what has gone.
+// drawColumns seats arrivals, updates what is seated, and clears what has gone.
 //
 // Returns how many tickets are on screen.
-function drawTickets(orders, pipelines, filter) {
-  const container = $('tickets');
+function drawColumns(s, orders, filter) {
+  const container = $('order-columns');
   const byId = new Map(orders.map((o) => [o.orderId, o]));
+  const versions = (s.deployment.versions || []).map((v) => v.label);
 
-  // Orders that finished before this page opened never appear.
   if (!drawnOnce) {
     for (const order of orders) {
       if (order.done) retired.add(order.orderId);
     }
   }
 
-  // Free any slot whose order has left the window or finished fading.
-  for (let i = 0; i < slots.length; i += 1) {
-    const id = slots[i];
-    if (!id) continue;
+  // Drop tickets whose order has left the window or finished collapsing.
+  for (const [id, node] of seatedNodes) {
     if (!byId.has(id) || retired.has(id)) {
-      const node = seatedNodes.get(id);
-      if (node) node.remove();
+      node.remove();
       seatedNodes.delete(id);
-      slots[i] = null;
     }
   }
-
-  // Seat arrivals in order ID, which is monotonic with start time and — unlike
-  // age — never changes for a given order. Lowest free slot first, so the rail
-  // fills its gaps rather than growing.
-  const seated = new Set(slots.filter(Boolean));
-  const arrivals = orders
-    .filter((o) => !seated.has(o.orderId) && !retired.has(o.orderId))
-    .sort((a, b) => (a.orderId < b.orderId ? -1 : 1));
-
-  for (const order of arrivals) {
-    let index = slots.indexOf(null);
-    if (index === -1) index = slots.push(null) - 1;
-    slots[index] = order.orderId;
-  }
-
-  // Forget retired orders once they leave the window, so the set cannot grow.
   for (const id of retired) {
     if (!byId.has(id)) retired.delete(id);
   }
 
-  // Trim trailing free slots, so the rail is as long as the work in it. Gaps
-  // *between* seated orders stay, because those hold position for the ticket
-  // after them; trailing ones hold nothing and would just be rows of empty
-  // boxes when the rail is far below its cap.
-  while (slots.length && slots[slots.length - 1] === null) slots.pop();
+  // Group by version, oldest first. Order IDs are zero-padded and monotonic
+  // with start time, so sorting on them is stable — unlike age, which is whole
+  // seconds and leaves dozens of orders tied and reshuffling every frame.
+  const byVersion = new Map(versions.map((v) => [v, []]));
+  for (const order of orders) {
+    if (!order.version || retired.has(order.orderId)) continue;
+    const bucket = byVersion.get(order.version);
+    if (bucket) bucket.push(order);
+  }
+  for (const bucket of byVersion.values()) {
+    bucket.sort((a, b) => (a.orderId < b.orderId ? -1 : 1));
+  }
 
-  const showing = [];
-  const children = [];
+  // Columns are reused across frames, so a stack is never rebuilt underneath
+  // an animation in progress.
+  const cols = [];
+  let showing = 0;
 
-  for (const id of slots) {
-    const order = id ? byId.get(id) : null;
-    if (!order) {
-      // An empty slot still holds its place, or every ticket after it would
-      // shift the moment one order finished.
-      children.push(el('div', { class: 'ticket-slot' }));
-      continue;
-    }
+  for (const label of versions) {
+    const parts = column(label);
+    cols.push(parts.col);
 
-    let node = seatedNodes.get(id);
-    if (!node) {
-      node = ticket(order, pipelines);
-      seatedNodes.set(id, node);
-    }
-    updateTicket(node, order, pipelines);
+    const bucket = (byVersion.get(label) || []).filter(filter);
+    const visible = bucket.slice(0, columnMax);
+    const hidden = bucket.length - visible.length;
 
-    // A finished order plays out and goes, keeping its slot while it fades.
-    if (order.done && !node.dataset.leaving) {
-      node.dataset.leaving = '1';
-      node.classList.add('ticket-leaving');
-      setTimeout(() => retired.add(id), leaveMs);
-    }
+    const children = [];
+    for (const order of visible) {
+      let node = seatedNodes.get(order.orderId);
+      if (!node) {
+        node = otick(order, s.pipelines || {});
+        seatedNodes.set(order.orderId, node);
+      }
+      updateOtick(node, order, s.pipelines || {});
 
-    if (filter(order)) {
+      // A finished order collapses out, keeping its height while it fades so
+      // the stack below it slides rather than snaps.
+      if (order.done && !node.dataset.leaving) {
+        node.dataset.leaving = '1';
+        // Two frames: the browser needs the ticket laid out at full height
+        // before the transition to zero has anything to animate from.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          node.classList.add('otick-leaving');
+        }));
+        setTimeout(() => retired.add(order.orderId), leaveMs);
+      }
+
       children.push(node);
-      showing.push(id);
-    } else {
-      // Filtering is a deliberate inspection, so it collapses rather than
-      // leaving the rail full of holes. Positions are stable in the default
-      // view, which is the one being watched.
-      children.push(el('div', { class: 'ticket-slot ticket-slot-hidden' }));
+      showing += 1;
     }
+
+    parts.stack.replaceChildren(...children);
+    parts.count.textContent = bucket.length ? `${bucket.length} shown` : '';
+    parts.more.textContent = hidden > 0 ? `+${hidden} more in flight` : '';
+    parts.empty.textContent = bucket.length ? '' : 'idle';
   }
 
-  container.replaceChildren(...children);
+  // Only rewrite the container when the set of columns changes, so reordering
+  // never disturbs a stack mid-animation.
+  if (container.dataset.versions !== versions.join(',')) {
+    container.dataset.versions = versions.join(',');
+    container.replaceChildren(...cols);
+  }
+
   drawnOnce = true;
-  return showing.length;
+  return showing;
 }
 
-function ticket(order, pipelines) {
-  const node = el('div', { class: 'ticket' });
+// column returns one version's column, building it on first use.
+function column(label) {
+  let parts = columnNodes.get(label);
+  if (parts) return parts;
+
+  const col = el('div', { class: 'order-col' });
+  col.style.setProperty('--version-color', colorFor(label));
+
+  const count = el('span', { class: 'order-col-count' });
+  const head = el('div', { class: 'order-col-head' });
+  head.append(el('span', { class: 'order-col-name', text: label }), count);
+
+  const stack = el('div', { class: 'order-stack' });
+  const empty = el('div', { class: 'order-col-empty' });
+  const more = el('div', { class: 'order-col-more' });
+  col.append(head, stack, empty, more);
+
+  parts = { col, stack, count, more, empty };
+  columnNodes.set(label, parts);
+  return parts;
+}
+
+// otick builds one compact ticket for a column.
+function otick(order, pipelines) {
+  const node = el('div', { class: 'otick otick-arriving' });
   node.dataset.orderId = order.orderId;
-  node.style.setProperty('--version-color', colorFor(order.version));
 
-  const top = el('div', { class: 'ticket-top' });
-  top.append(
-    el('span', { class: 'ticket-id', text: order.orderId.replace(/^ord-0*/, '#') }),
-    el('span', { class: 'ticket-version', text: order.version || '…' }),
-  );
-  node.append(
-    top,
-    el('div', { class: 'ticket-steps' }),
-    el('div', { class: 'ticket-step' }),
-    el('div', { class: 'ticket-age' }),
+  const idRow = el('div', { class: 'otick-row' });
+  idRow.append(
+    el('span', { class: 'otick-id', text: order.orderId.replace(/^ord-0*/, '#') }),
+    el('span', { class: 'otick-age' }),
   );
 
-  return updateTicket(node, order, pipelines);
+  const stepRow = el('div', { class: 'otick-row' });
+  stepRow.append(
+    el('span', { class: 'otick-steps' }),
+    el('span', { class: 'otick-step' }),
+  );
+
+  node.append(idRow, stepRow);
+  setTimeout(() => node.classList.remove('otick-arriving'), 260);
+  return updateOtick(node, order, pipelines);
 }
 
-// updateTicket writes an order's current state into an existing ticket.
+// updateOtick writes an order's current state into an existing ticket.
 //
-// Only the step dots are rebuilt, and only when the order has actually moved:
-// redrawing them every tick would restart the pulse on the live dot, which is
-// the one thing that shows the order is alive.
-function updateTicket(node, order, pipelines) {
+// The step dots are rebuilt only when the order has actually moved: redrawing
+// them every frame would restart the pulse on the live dot, which is the one
+// thing showing the order is alive.
+function updateOtick(node, order, pipelines) {
   const done = order.done;
-  node.className = 'ticket' + (order.degraded ? ' ticket-stuck' : '') + (done ? ' ticket-done' : '');
-
-  const [top, steps, step, ageLine] = node.children;
-
-  // The version has to be refreshed, not just set at creation.
-  //
-  // An order that has been started but whose first Workflow Task has not run
-  // yet has no version: the Workflow publishes that about itself on its first
-  // task, so for a moment visibility reports it as Running with no version and
-  // no step. A ticket seated in that window used to keep its placeholder and
-  // its grey forever, because only the step dots were being updated.
-  const shown = order.version || '';
-  if (node.dataset.shownVersion !== shown) {
-    node.dataset.shownVersion = shown;
-    top.children[1].textContent = shown || '…';
-    node.style.setProperty('--version-color', colorFor(order.version));
+  if (!node.dataset.leaving) {
+    node.className = 'otick' +
+      (node.classList.contains('otick-arriving') ? ' otick-arriving' : '') +
+      (order.degraded ? ' otick-stuck' : '');
   }
+
+  const [idRow, stepRow] = node.children;
+  const [, ageEl] = idRow.children;
+  const [steps, stepEl] = stepRow.children;
 
   const reached = done ? 'done' : String(order.step);
   if (steps.dataset.at !== reached) {
@@ -1014,11 +1042,9 @@ function updateTicket(node, order, pipelines) {
     steps.replaceChildren(...stepDots(order, pipelines, done));
   }
 
-  // No step yet means the order is queued and no worker has taken it — which
-  // is worth saying, rather than showing a dash.
-  step.textContent = order.degraded ? 'stuck: ' + order.step
+  stepEl.textContent = order.degraded ? 'stuck: ' + order.step
     : order.step || 'waiting for a worker';
-  ageLine.textContent = done ? 'served in ' + age(order.elapsedSec) : age(order.elapsedSec);
+  ageEl.textContent = age(order.elapsedSec);
   return node;
 }
 
@@ -1135,7 +1161,7 @@ for (const chip of document.querySelectorAll('.chip[data-spike]')) {
 for (const chip of document.querySelectorAll('.chip[data-filter]')) {
   chip.addEventListener('click', () => {
     railFilter = chip.dataset.filter;
-    if (snapshot) renderRail(snapshot);
+    if (snapshot) renderColumns(snapshot);
   });
 }
 
