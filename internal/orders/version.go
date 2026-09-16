@@ -37,6 +37,36 @@ const (
 	StepHandoff        Step = "Handoff"
 )
 
+// ActivityName is the Activity type this step runs as.
+//
+// Every step is its own Activity type, so a version's pipeline is visible in
+// Event History and in the worker's registered types rather than only in this
+// package's data. Rolling v3 to v4 adds a DispatchMobilePickup Activity that
+// did not exist before, which is the change an audience should be able to see
+// without being told.
+func (s Step) ActivityName() string {
+	switch s {
+	case StepReceived:
+		return "ReceiveOrder"
+	case StepFraudCheck:
+		return "ScreenForFraud"
+	case StepPayment:
+		return "ChargePayment"
+	case StepLoyalty:
+		return "AccrueLoyalty"
+	case StepPrep:
+		return "PrepareOrder"
+	case StepMobileDispatch:
+		return "DispatchMobilePickup"
+	case StepDriveThru:
+		return "HandOffAtDriveThru"
+	case StepHandoff:
+		return "HandOffToCustomer"
+	default:
+		return "PerformStep"
+	}
+}
+
 // StepsFor returns the ordered pipeline for a version.
 //
 // The differences between versions are deliberately varied, so a rollout

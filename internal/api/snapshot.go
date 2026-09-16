@@ -149,6 +149,7 @@ func (s *Server) poll(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 			snapshot := s.build(ctx)
 			s.store(snapshot)
+			s.reconcileFaults(ctx, snapshot)
 
 			payload, err := json.Marshal(snapshot)
 			if err != nil {

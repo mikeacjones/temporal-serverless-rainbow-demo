@@ -636,6 +636,85 @@ confident, entirely wrong number, which is the worst kind. The value is
 the first field after the closing brace.
 `TestParseSampleIgnoresTrailingTimestamp` pins it.
 
+## One Activity for every step was the wrong abstraction
+
+Every step originally ran through a single `PerformStep` Activity, on the
+reasoning that what differs between versions is which steps run and in
+what order, not what a step does. That is true of the *code* and wrong
+for the demo: in Event History all five versions looked identical — five
+indistinguishable `PerformStep` entries — so the one thing the audience
+is supposed to see, that v4 added a fraud check and a mobile dispatch,
+was invisible in the very tool you would open to look for it.
+
+Each step is now its own Activity type, and a worker registers only the
+types its own version runs. A v1 worker registers four, a v4 worker
+seven. A real v4 order's history now reads:
+
+```
+ReceiveOrder → ScreenForFraud → ChargePayment → AccrueLoyalty
+             → PrepareOrder → DispatchMobilePickup → HandOffToCustomer
+```
+
+They still share one implementation, because a step's behaviour genuinely
+is uniform; splitting the *type* while sharing the body is what keeps the
+pipelines honest on screen without pretending eight steps need eight
+different bodies.
+
+## A stuck order could never be unstuck
+
+Worse than it looked. The fault was resolved once, at the top of each
+step, into a `StepInput` with `Fail: true` — and then that same input was
+retried forever. The Activity was being *told* to fail on every attempt,
+so no amount of clearing the injector reached it. Resetting the order
+onto another version was the only way out.
+
+Two changes make it recoverable:
+
+- The fault is resolved **per attempt**, from the order's own mutable
+  state, rather than once per step.
+- `SignalClearFault` sets that state aside. Clearing the injector fires a
+  batch Signal, each order cancels the attempt in flight and re-runs the
+  step clean.
+
+Retries also changed shape. A step is now **probed** with three bounded
+attempts — bounding execution, not queue time, so a backlog still cannot
+be mistaken for a breakage — and only then **parked** on an unbounded
+retry with a backoff to 60s. Parked is the honest state for an unpaid
+coffee: the order is owed, not lost. In the Temporal UI it is one
+Activity with a climbing attempt count, which is what a durable retry
+should look like.
+
+### Releasing only the stuck orders was not enough
+
+The first version of the release batch queried `OrderHealth = "degraded"`,
+which looks like the obvious optimisation and left orders stuck anyway.
+The fault travels in each order's input, so an order that started before
+the clear but has not yet reached the broken step is still carrying it:
+healthy when the batch runs, stuck seconds later, with nothing coming for
+it. Observed as a contiguous cohort of 46 orders, stable and stuck, after
+a clear that had already released 145 others.
+
+The generator makes the gap unavoidable at source — it plans a window of
+orders at a time and stamps the fault in when the window is planned, so
+for up to one window after a clear it is still starting poisoned orders.
+Rather than chase that timing, the invariant is now repaired: the poll
+loop releases anything parked while no fault is configured, at most once
+every 20s. Signalling an order with no fault is harmless, and a genuinely
+broken version stays degraded because the Signal only sets aside an
+*injected* fault.
+
+Verified end to end on the local stack, hands-off: 56 orders stuck, the
+fault cleared, and every one of them completed — 0 stuck, 0 failed.
+
+## A terminated order is finished, but was not "Completed"
+
+The live strip retired orders by checking `status === "Completed"`, so a
+terminated, failed or timed-out order was never retired and sat there
+looking live indefinitely. The visibility record now carries `done`,
+meaning closed for any reason, and the rail uses that. Order-duration
+figures still use the status, because a terminated order stopped partway
+and its elapsed time is not how long an order takes.
+
 ## Slots are unreachable without pollers to fill them
 
 At 1,000 orders/min the fleet peaked at **731 concurrent Lambda

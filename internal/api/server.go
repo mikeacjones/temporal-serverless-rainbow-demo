@@ -66,6 +66,10 @@ type Server struct {
 	traffic  *trafficController
 	rollouts *rolloutController
 
+	// lastReconcile throttles the fault repair. Touched only by the poll
+	// goroutine, so it needs no lock.
+	lastReconcile time.Time
+
 	allowedOrigin string
 
 	// snapshot is replaced wholesale on each poll, so readers never see a

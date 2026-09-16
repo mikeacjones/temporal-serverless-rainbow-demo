@@ -14,8 +14,16 @@ const (
 	// version's worker.
 	GateWorkflowTypeName = "OrderGate"
 
-	// PerformStepActivityName is the single Activity every step goes through.
-	PerformStepActivityName = "PerformStep"
+	// SignalClearFault tells a stuck order to stop applying the fault it was
+	// started with.
+	//
+	// The fault travels with the order, which is what lets any version be the
+	// bad one without shared mutable state — but it also meant a stuck order
+	// could never recover, because every retry re-read the same poisoned
+	// input. This signal is the way back: clearing the fault in the dashboard
+	// sends it to every order still carrying one, and their next attempt runs
+	// clean.
+	SignalClearFault = "clearFault"
 )
 
 // ChaosMode is how an injected fault behaves.
@@ -93,9 +101,12 @@ type OrderState struct {
 	Version     Version `json:"version"`
 	Steps       []Step  `json:"steps"`
 	CurrentStep int     `json:"currentStep"`
-	// Degraded is set once a step has been running long enough to look stuck.
+	// Degraded is set once a step has genuinely failed rather than merely
+	// being slow to find a worker.
 	Degraded bool `json:"degraded"`
-	Done     bool `json:"done"`
+	// FaultCleared records that this order was told to drop its fault.
+	FaultCleared bool `json:"faultCleared,omitempty"`
+	Done         bool `json:"done"`
 }
 
 // StepInput is the Activity payload for one step.
@@ -103,8 +114,10 @@ type StepInput struct {
 	OrderID string  `json:"orderId"`
 	Version Version `json:"version"`
 	Step    Step    `json:"step"`
-	// Fail and Slow are resolved by the Workflow from the order's ChaosSpec,
-	// so the Activity itself needs no knowledge of chaos configuration.
+	// Fail and Slow are resolved by the Workflow from the order's ChaosSpec on
+	// every attempt, so the Activity needs no knowledge of chaos
+	// configuration — and a fault cleared mid-flight takes effect on the next
+	// attempt rather than being baked in for the order's lifetime.
 	Fail bool `json:"fail,omitempty"`
 	Slow bool `json:"slow,omitempty"`
 }

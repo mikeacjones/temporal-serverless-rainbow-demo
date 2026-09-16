@@ -47,11 +47,23 @@ func Register(w Registry, v Version, profile Profile) {
 		},
 	)
 
+	// One Activity type per step, and only the steps this version actually
+	// runs. That is what makes the versions genuinely different to look at:
+	// a v1 worker registers four Activity types, a v4 worker registers seven,
+	// and an order's Event History names the work it did — ChargePayment,
+	// ScreenForFraud — instead of five identical PerformStep entries.
+	//
+	// They share one implementation because a step's *behaviour* is not what
+	// differs between versions; its presence and position are. Sharing the
+	// body while splitting the type keeps the pipelines honest on screen
+	// without pretending eight steps need eight different bodies.
 	activities := &Activities{Profile: profile}
-	w.RegisterActivityWithOptions(
-		activities.PerformStep,
-		activity.RegisterOptions{Name: PerformStepActivityName},
-	)
+	for _, step := range StepsFor(v) {
+		w.RegisterActivityWithOptions(
+			activities.PerformStep,
+			activity.RegisterOptions{Name: step.ActivityName()},
+		)
+	}
 }
 
 // Menu is what a customer can order. Purely cosmetic: it gives the dashboard

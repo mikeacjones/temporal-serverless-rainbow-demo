@@ -44,9 +44,15 @@ const (
 	// 17s under "heavy") while still catching a deliberately slowed one.
 	stepStartToClose = 30 * time.Second
 
-	// stuckRetryPause is how long a stuck order waits before trying its step
-	// again, once Temporal's own Activity retries are exhausted.
-	stuckRetryPause = 15 * time.Second
+	// probeAttempts is how many times a step is tried before the order is
+	// called stuck. Bounded, because exhausting them is the signal — and it is
+	// a signal about the step's execution, not about how busy the queue is.
+	probeAttempts = 3
+
+	// parkBackoffMax caps the wait between attempts once an order is parked.
+	// Long enough that a thousand stuck orders are not hammering a broken
+	// dependency, short enough that recovery looks prompt.
+	parkBackoffMax = 60 * time.Second
 )
 
 // Order runs one customer order through the pipeline of version v.
@@ -104,32 +110,41 @@ func run(ctx workflow.Context, v Version, in OrderInput, opts runOptions) (Order
 		saOrderHealth.ValueSet(HealthOK),
 	)
 
-	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: stepStartToClose,
-		// No ScheduleToStartTimeout: queuing is not failure. Orders waiting
-		// behind a backlog should wait, not time out.
-		RetryPolicy: &temporal.RetryPolicy{
-			InitialInterval:    2 * time.Second,
-			BackoffCoefficient: 1.5,
-			MaximumInterval:    10 * time.Second,
-			// Bounded on purpose. When these are exhausted the step has really
-			// failed — as opposed to merely being slow to get a worker — and
-			// the Workflow can say so before deciding what to do next.
-			MaximumAttempts: 3,
-		},
-	})
+	runner := &stepRunner{
+		probe: workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: stepStartToClose,
+			// No ScheduleToStartTimeout: queuing is not failure. Orders waiting
+			// behind a backlog should wait, not time out.
+			RetryPolicy: &temporal.RetryPolicy{
+				InitialInterval:    2 * time.Second,
+				BackoffCoefficient: 1.5,
+				MaximumInterval:    10 * time.Second,
+				MaximumAttempts:    probeAttempts,
+			},
+		}),
+		park: workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: stepStartToClose,
+			RetryPolicy: &temporal.RetryPolicy{
+				InitialInterval:    5 * time.Second,
+				BackoffCoefficient: 2,
+				MaximumInterval:    parkBackoffMax,
+				// Unlimited. A stuck order is not a lost order: the customer's
+				// coffee is still owed, so it waits for the fault to be fixed
+				// rather than failing and dropping the work on the floor.
+				MaximumAttempts: 0,
+			},
+		}),
+		state: &state,
+		chaos: in.Chaos,
+		clear: workflow.GetSignalChannel(ctx, SignalClearFault),
+		opts:  opts,
+	}
 
 	for i, step := range state.Steps {
 		state.CurrentStep = i
 		_ = workflow.UpsertTypedSearchAttributes(ctx, saOrderStep.ValueSet(string(step)))
 
-		if err := runStep(ctx, &state, StepInput{
-			OrderID: in.OrderID,
-			Version: v,
-			Step:    step,
-			Fail:    in.Chaos.appliesTo(v, step) && in.Chaos.Mode == ChaosFail,
-			Slow:    in.Chaos.appliesTo(v, step) && in.Chaos.Mode == ChaosSlow,
-		}, opts); err != nil {
+		if err := runner.run(step); err != nil {
 			return OrderResult{}, err
 		}
 	}
@@ -138,42 +153,122 @@ func run(ctx workflow.Context, v Version, in OrderInput, opts runOptions) (Order
 	return OrderResult{OrderID: in.OrderID, Version: v, Steps: state.Steps}, nil
 }
 
-// runStep executes one step, marking the order stuck if the step genuinely
-// fails.
+// stepRunner holds what every step of one order needs.
 //
-// "Genuinely" is the important word. Temporal has already retried the Activity
-// several times by the time an error reaches here, and those retries are of
-// execution, not of waiting for a worker. So an error here means the step is
-// broken, not that the system is busy — which is what makes this a signal a
-// rollout can safely act on.
-func runStep(ctx workflow.Context, state *OrderState, in StepInput, opts runOptions) error {
+// The two contexts are the whole idea: a step is first *probed* with bounded
+// retries to find out whether it is broken, and only then *parked* on an
+// unbounded retry to wait for it to be fixed.
+type stepRunner struct {
+	// probe retries a few times. Its attempts bound execution, not queue
+	// time, so exhausting them means the step is genuinely failing rather
+	// than merely waiting for a worker.
+	probe workflow.Context
+	// park retries forever with a long backoff. An order that reaches here is
+	// stuck but not lost, and is waiting to be released.
+	park workflow.Context
+
+	state *OrderState
+	chaos *ChaosSpec
+	// clear carries SignalClearFault, which releases a parked order.
+	clear workflow.ReceiveChannel
+	opts  runOptions
+}
+
+// input builds the Activity payload for a step, resolving the fault *now*.
+//
+// Resolving per attempt rather than once per order is what makes a stuck
+// order recoverable: once the order has been told to drop its fault, the very
+// next attempt asks for clean work.
+func (r *stepRunner) input(step Step) StepInput {
+	faulted := !r.state.FaultCleared && r.chaos.appliesTo(r.state.Version, step)
+	return StepInput{
+		OrderID: r.state.OrderID,
+		Version: r.state.Version,
+		Step:    step,
+		Fail:    faulted && r.chaos.Mode == ChaosFail,
+		Slow:    faulted && r.chaos.Mode == ChaosSlow,
+	}
+}
+
+// run executes one step, parking the order if the step is genuinely broken.
+func (r *stepRunner) run(step Step) error {
+	err := workflow.ExecuteActivity(r.probe, step.ActivityName(), r.input(step)).Get(r.probe, nil)
+	if err == nil {
+		r.healthy()
+		return nil
+	}
+
+	// A gate probe stops here on purpose: a broken candidate should fail its
+	// gate promptly, not park and hang the rollout waiting on it.
+	if !r.opts.retryForever {
+		return err
+	}
+
+	r.stuck(step, err)
+	return r.parkUntilFixed(step)
+}
+
+// parkUntilFixed retries the step forever, and lets a cleared fault release it.
+//
+// The Activity retries on its own schedule, so an operator watching the
+// Temporal UI sees one Activity with a climbing attempt count and a widening
+// backoff — the honest picture of a durable retry. Clearing the fault cancels
+// that attempt so the step can be re-run clean immediately, rather than the
+// order waiting out whatever backoff it had reached.
+func (r *stepRunner) parkUntilFixed(step Step) error {
 	for {
-		err := workflow.ExecuteActivity(ctx, PerformStepActivityName, in).Get(ctx, nil)
+		attempt, cancelAttempt := workflow.WithCancel(r.park)
+		future := workflow.ExecuteActivity(attempt, step.ActivityName(), r.input(step))
+
+		var err error
+		var settled, released bool
+
+		selector := workflow.NewSelector(r.park)
+		selector.AddFuture(future, func(f workflow.Future) {
+			err = f.Get(r.park, nil)
+			settled = true
+		})
+		selector.AddReceive(r.clear, func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(r.park, nil)
+			r.state.FaultCleared = true
+			released = true
+			// Drop the poisoned attempt rather than waiting out its backoff.
+			cancelAttempt()
+		})
+
+		for !settled {
+			selector.Select(r.park)
+		}
+		cancelAttempt()
 
 		if err == nil {
-			if state.Degraded {
-				// It came good on a retry: stop counting this order as stuck.
-				state.Degraded = false
-				_ = workflow.UpsertTypedSearchAttributes(ctx, saOrderHealth.ValueSet(HealthOK))
-			}
+			r.healthy()
 			return nil
 		}
-
-		if !opts.retryForever {
-			return err
+		if released {
+			// Cancelled by the operator, not by failure: run it again clean.
+			continue
 		}
-
-		if !state.Degraded {
-			state.Degraded = true
-			_ = workflow.UpsertTypedSearchAttributes(ctx, saOrderHealth.ValueSet(HealthDegraded))
-			workflow.GetLogger(ctx).Warn("order stuck on step",
-				"orderId", in.OrderID, "version", in.Version, "step", in.Step, "err", err)
-		}
-
-		// Keep trying. The order is stuck, not lost — and an operator can
-		// rescue it onto a healthy version at any point.
-		if err := workflow.Sleep(ctx, stuckRetryPause); err != nil {
-			return err
-		}
+		return err
 	}
+}
+
+// stuck marks the order degraded, once.
+func (r *stepRunner) stuck(step Step, err error) {
+	if r.state.Degraded {
+		return
+	}
+	r.state.Degraded = true
+	_ = workflow.UpsertTypedSearchAttributes(r.park, saOrderHealth.ValueSet(HealthDegraded))
+	workflow.GetLogger(r.park).Warn("order stuck on step",
+		"orderId", r.state.OrderID, "version", r.state.Version, "step", step, "err", err)
+}
+
+// healthy clears a degraded mark once the order is moving again.
+func (r *stepRunner) healthy() {
+	if !r.state.Degraded {
+		return
+	}
+	r.state.Degraded = false
+	_ = workflow.UpsertTypedSearchAttributes(r.park, saOrderHealth.ValueSet(HealthOK))
 }

@@ -177,6 +177,10 @@ function renderReadouts(s) {
 //
 // A median rather than a p99: the sample is the most recent few dozen orders,
 // which is nowhere near enough to place a tail percentile honestly.
+//
+// This one really does want Completed rather than order.done: a terminated or
+// failed order stopped partway, so its elapsed time is not how long an order
+// takes.
 function medianOrderTime(orders) {
   const done = (orders || [])
     .filter((o) => o.status === 'Completed')
@@ -876,7 +880,7 @@ function drawTickets(orders, pipelines, filter) {
   // Orders that finished before this page opened never appear.
   if (!drawnOnce) {
     for (const order of orders) {
-      if (order.status === 'Completed') retired.add(order.orderId);
+      if (order.done) retired.add(order.orderId);
     }
   }
 
@@ -937,7 +941,7 @@ function drawTickets(orders, pipelines, filter) {
     updateTicket(node, order, pipelines);
 
     // A finished order plays out and goes, keeping its slot while it fades.
-    if (order.status === 'Completed' && !node.dataset.leaving) {
+    if (order.done && !node.dataset.leaving) {
       node.dataset.leaving = '1';
       node.classList.add('ticket-leaving');
       setTimeout(() => retired.add(id), leaveMs);
@@ -985,7 +989,7 @@ function ticket(order, pipelines) {
 // redrawing them every tick would restart the pulse on the live dot, which is
 // the one thing that shows the order is alive.
 function updateTicket(node, order, pipelines) {
-  const done = order.status === 'Completed';
+  const done = order.done;
   node.className = 'ticket' + (order.degraded ? ' ticket-stuck' : '') + (done ? ' ticket-done' : '');
 
   const [top, steps, step, ageLine] = node.children;
