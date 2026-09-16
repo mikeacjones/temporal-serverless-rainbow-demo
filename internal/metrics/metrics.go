@@ -63,41 +63,69 @@ func (r *Reader) VersionHealth(ctx context.Context, buildID string, since time.T
 		scope += fmt.Sprintf(` AND StartTime > %q`, since.UTC().Format(time.RFC3339))
 	}
 
-	// Four counts, run together rather than one after another. Sequentially
-	// this is four cross-region round trips per version, and with five
-	// versions that was twenty round trips on every dashboard poll — enough
-	// to starve whatever ran last.
-	queries := []struct {
-		filter string
-		into   *int64
-	}{
-		{`ExecutionStatus = "Running"`, &h.Running},
-		{`ExecutionStatus = "Completed"`, &h.Completed},
-		{`ExecutionStatus = "Failed"`, &h.Failed},
-		{fmt.Sprintf(`ExecutionStatus = "Running" AND OrderHealth = %q`, orders.HealthDegraded), &h.Degraded},
-	}
-
+	// Two counts, not four.
+	//
+	// GROUP BY returns every status from one query, which matters because
+	// this runs per version: four separate counts across five versions was
+	// twenty cross-region round trips on every dashboard poll. Measured
+	// against the cloud namespace, the grouped form takes 378ms where the
+	// four separate counts take 1,641ms.
+	//
+	// The degraded count cannot join them. GROUP BY accepts only a single
+	// field, and only ExecutionStatus — it is rejected outright for
+	// OrderHealth ("'GROUP BY' clause is not supported for search attribute
+	// OrderHealth"), so stuck orders need their own query.
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
 		firstErr error
 	)
-	for _, q := range queries {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			n, err := r.count(ctx, scope+" AND "+q.filter)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				return
-			}
-			*q.into = n
-		}()
+	fail := func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		resp, err := r.c.CountWorkflow(ctx, &workflowservice.CountWorkflowExecutionsRequest{
+			Namespace: r.namespace,
+			Query:     scope + " GROUP BY ExecutionStatus",
+		})
+		if err != nil {
+			fail(fmt.Errorf("count %s by status: %w", buildID, err))
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, g := range resp.GetGroups() {
+			switch groupValue(g) {
+			case "Running":
+				h.Running = g.GetCount()
+			case "Completed":
+				h.Completed = g.GetCount()
+			case "Failed":
+				h.Failed = g.GetCount()
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		n, err := r.count(ctx, fmt.Sprintf(`%s AND ExecutionStatus = "Running" AND OrderHealth = %q`,
+			scope, orders.HealthDegraded))
+		if err != nil {
+			fail(err)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		h.Degraded = n
+	}()
+
 	wg.Wait()
 
 	if firstErr != nil {

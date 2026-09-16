@@ -145,10 +145,18 @@ const snapshotBudget = 10 * time.Second
 
 // healthTTL is how long a per-version health reading is reused.
 //
-// Five versions at four counts each is twenty visibility queries; at one
-// snapshot a second that is twenty queries a second for numbers that move
-// slowly. A few seconds of staleness on a station card is invisible.
-const healthTTL = 3 * time.Second
+// Health is the most expensive thing the dashboard reads: two visibility
+// counts per version, and visibility counts are the slow calls — around 380ms
+// each against the cloud namespace, where a task-queue describe is 74ms. At
+// five versions that is ten of them, and the whole snapshot is built
+// synchronously, so the poll interval is really "however long the slowest read
+// took". Measured cadences of 5s and 10s came almost entirely from here.
+//
+// Ten seconds is not a compromise: the rollout coordinator evaluates health on
+// its own 10s interval, so a fresher reading was never being acted on. The
+// numbers that need to be live — backlog, workers, orders in flight — are
+// cheap and stay on every cycle.
+const healthTTL = 10 * time.Second
 
 // poll rebuilds the snapshot on a timer and pushes it to every browser.
 func (s *Server) poll(ctx context.Context, interval time.Duration) {
