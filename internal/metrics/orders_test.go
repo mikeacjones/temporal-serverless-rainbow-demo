@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -112,5 +114,38 @@ func TestOrderSampleIsScopedPerVersionAndToRunningOrders(t *testing.T) {
 	// window again by a different route.
 	if recentOrdersQuery("v1") == recentOrdersQuery("v2") {
 		t.Error("every version produced the same query")
+	}
+}
+
+// An empty sample must encode as [] rather than null.
+//
+// The snapshot is serialised straight to the dashboard, and a null where an
+// array is expected is the kind of thing that survives until something
+// downstream iterates it.
+func TestAnEmptySampleIsAnEmptyList(t *testing.T) {
+	r := &Reader{}
+	for _, tc := range []struct {
+		name     string
+		versions []string
+		per      int
+	}{
+		{"no versions", nil, 40},
+		{"no rows asked for", []string{"v1"}, 0},
+	} {
+		got, err := r.RecentOrders(context.Background(), tc.versions, tc.per)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got == nil {
+			t.Errorf("%s: returned nil, which encodes as null", tc.name)
+			continue
+		}
+		encoded, err := json.Marshal(got)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", tc.name, err)
+		}
+		if string(encoded) != "[]" {
+			t.Errorf("%s: encoded as %s, want []", tc.name, encoded)
+		}
 	}
 }

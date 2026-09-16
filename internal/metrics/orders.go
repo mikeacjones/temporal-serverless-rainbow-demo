@@ -53,14 +53,16 @@ type LiveOrder struct {
 // most of every window — at any real order rate the great majority of recent
 // orders have already finished — and the dashboard shows work in flight.
 func (r *Reader) RecentOrders(ctx context.Context, versions []string, perVersion int) ([]LiveOrder, error) {
+	// Always a slice, never nil: this is serialised straight to the dashboard,
+	// and an empty list must encode as [] rather than null.
+	out := []LiveOrder{}
 	if perVersion <= 0 || len(versions) == 0 {
-		return nil, nil
+		return out, nil
 	}
 
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
-		out      []LiveOrder
 		firstErr error
 	)
 
