@@ -296,7 +296,9 @@ to the backend Service in the same namespace.
 | `ORDER_VERSION` | `v1` | order worker; which pipeline it serves |
 | `ORDER_PROFILE` | `demo` | order worker; `fast`, `demo` or `heavy` |
 | `TEMPORAL_WORKER_BUILD_ID` | the version label | order worker |
-| `WORKER_MAX_CONCURRENT_ACTIVITIES` | `20` | order worker |
+| `WORKER_MAX_CONCURRENT_ACTIVITIES` | `20` | order worker; unset leaves the SDK's Lambda default |
+| `WORKER_MAX_CONCURRENT_WORKFLOW_TASKS` | SDK default | order worker; unset leaves the SDK's Lambda default |
+| `WORKER_MAX_POLLERS` | `10` | order worker; ceiling for poller autoscaling |
 | `PORT` | `8080` | backend |
 | `POLL_INTERVAL` | `1s` | backend |
 | `TEMPORAL_METRICS_URL` | — | backend; where to read the sync match rate. Self-hosted: the server's own metrics port. Temporal Cloud: `https://metrics.temporal.io/v1/metrics`. Without it the gauge reports itself unavailable. |

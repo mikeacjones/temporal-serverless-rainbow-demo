@@ -636,6 +636,100 @@ confident, entirely wrong number, which is the worst kind. The value is
 the first field after the closing brace.
 `TestParseSampleIgnoresTrailingTimestamp` pins it.
 
+## Slots are unreachable without pollers to fill them
+
+At 1,000 orders/min the fleet peaked at **731 concurrent Lambda
+invocations** while each one ran about **0.09 activity tasks a second** —
+roughly **1% slot utilisation** against 20 slots. The invocations were
+overwhelmingly idle long-pollers, each living ~114s against a 120s
+timeout.
+
+The cause was one line of the contrib package's defaults.
+`applyLambdaWorkerDefaults` pins `MaxConcurrentActivityTaskPollers` to 1,
+and the SDK auto-enrols a worker into poller autoscaling **only when
+that field is left at zero** (`internal_worker.go:2812` sets
+`eligibility.activityTask` in exactly that branch). So the
+"Lambda-appropriate default" is precisely what disables autoscaling.
+Nothing enforces it: the defaults only fill zero-valued fields, and they
+are applied *before* the configure callback, so the callback has the last
+word.
+
+Two corrections worth recording, because the first reasoning was wrong:
+
+- **One poller does not mean one task at a time.** `runPoller` reserves a
+  slot, performs the poll RPC, hands the task to a dispatcher and loops;
+  the task runs on its own goroutine (`internal_worker_base.go:505`, 700).
+  A single poller can fill every slot, bounded by poll round-trip latency
+  rather than task duration. Serverless workers are *not* 1:1
+  invocation-per-task.
+- **The dashboard's poller gauge is not concurrency.** Each invocation
+  registers a unique identity (`requestID@functionARN`), and Temporal
+  keeps recently-seen pollers in `PollerInfo` for a few minutes, so dead
+  invocations linger. It read 794 while real concurrency was 18.
+
+Clearing the counts is mandatory, not tidiness: setting a behaviour on
+top of them **panics** with *"cannot set both
+MaxConcurrentActivityTaskPollers and ActivityTaskPollerBehavior"*, which
+on Lambda is a cold start that dies on every invocation.
+`TestTunedWorkerConstructsWithoutPanicking` builds a real worker to prove
+the tuned options are accepted, and
+`TestBehaviourWithoutClearingTheCountPanics` proves the clearing is
+load-bearing.
+
+Workflow-task slots also stopped defaulting to 5. Passing a fallback to
+`EnvInt` always produces a non-zero override, which replaced
+lambdaworker's own Lambda-tuned default of 10 with a lower number for no
+reason.
+
+## Publishing a Lambda version does not deploy it
+
+A Worker Deployment Version pins a **qualified** Lambda ARN, and Temporal
+does not follow the latest publish. After deploying new code as `:4`, an
+invocation at 12:29:08 still ran **version 3** — the change was published
+and inert. Lambda log stream names carry the version (`2026/09/16/[3]…`),
+which is the quickest way to see which snapshot is actually serving.
+
+The registration is updatable from the CLI, so this does not need the
+Cloud UI:
+
+```bash
+temporal worker deployment update-version-compute-config \
+  --deployment-name rainbow-orders --build-id v1 \
+  --aws-lambda-function-arn <arn>:4 \
+  --aws-lambda-assume-role-arn <invoke-role> \
+  --aws-lambda-assume-role-external-id <external-id>
+```
+
+All three AWS flags are required together; the function ARN alone fails
+with *"missing required AWS Lambda provider detail: role"*. The external
+ID is recoverable from the invoke role's trust policy.
+
+## Never Query a closed Workflow
+
+Querying a closed Workflow makes a worker **replay its entire history** to
+rebuild the state the handler answers from. The rollout coordinator is
+unversioned by design, so changing the gate from an Activity to child
+Workflows changed its command sequence — and every dashboard poll then
+replayed a history recorded under the old code and panicked:
+
+```
+[TMPRL1100] lookup failed for scheduledEventID to activityID: scheduleEventID: 17
+```
+
+Event 17 was the old `RunGate` Activity; the new code emits a child
+Workflow command there. The Workflow had completed successfully hours
+earlier, and the panic was a hot loop at the dashboard's poll rate, not a
+stuck rollout. Nothing about the rollout was broken — only reading it was.
+
+A completed rollout is now read from its **result**, which is a recorded
+event needing no worker, and a rollout that was terminated or failed
+reports as nothing running. Only a RUNNING execution is ever queried;
+`TestOnlyARunningRolloutIsEverQueried` walks every status in the enum to
+keep it that way. This also replaced the earlier `orphaned()`
+reconciliation, which existed to unwedge the dashboard when a terminated
+rollout kept reporting itself as paused — reading by status fixes that
+case at the source.
+
 ## Two dashboard bugs that only showed up during a rollout
 
 **The Deployment panel flickered to "No deployment running".** The

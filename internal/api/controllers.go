@@ -137,59 +137,100 @@ var ErrRolloutRunning = errors.New("a rollout is already in progress")
 // one indefinitely. Comfortably longer than any plan a demo would use.
 const rolloutMaxDuration = 2 * time.Hour
 
-// state returns the current rollout's state, or nil when none has run.
+// state returns the last rollout's state, or nil when none is worth showing.
 //
-// A finished rollout still answers this Query, which is deliberate: the
-// dashboard should keep showing the outcome of the last rollout rather than
-// blanking the panel the moment it ends.
+// How it reads that state depends on whether the coordinator is still running,
+// and the distinction is not cosmetic.
 //
-// But a Query alone cannot tell you the Workflow is dead. A terminated
-// execution stays queryable for the namespace's retention period, and its
-// handler answers with whatever state it was holding when it stopped — so a
-// rollout terminated mid-ramp reports itself as "paused" indefinitely. That
-// state looks live to everything downstream: the version cards disable their
-// deployment buttons, start() refuses with "a rollout is already in progress",
-// and every control Update fails because the execution is closed. The
-// dashboard ends up wedged, insisting a rollout is running that cannot be
-// resumed, advanced or aborted.
+// Querying a *closed* Workflow makes a worker replay its entire history to
+// rebuild the state the handler would answer from. So any change to the
+// coordinator's command sequence turns every dashboard poll into a replay
+// failure on the worker — a hot loop of panics against a Workflow that
+// finished successfully hours ago. A completed rollout is therefore read from
+// its result, which is a recorded event: no replay, no worker involved, and
+// nothing that a later code change can invalidate.
 //
-// So a live-looking phase is reconciled against the execution's real status.
+// A closed rollout that did not complete has no result to read. It reports as
+// nothing running, which is also the honest answer: it cannot be resumed,
+// advanced or aborted, so presenting it as live would only wedge the dashboard
+// into refusing to start the next one.
 func (r *rolloutController) state(ctx context.Context) *rollout.State {
-	var state rollout.State
-	value, err := r.c.QueryWorkflow(ctx, rollout.WorkflowID, "", rollout.QueryGetState)
+	desc, err := r.c.DescribeWorkflowExecution(ctx, rollout.WorkflowID, "")
 	if err != nil {
+		// No execution yet, or a read problem. Either way there is nothing to
+		// show; a rollout that does exist will appear on the next poll.
 		return nil
 	}
+
+	switch readFor(desc.GetWorkflowExecutionInfo().GetStatus()) {
+	case readQuery:
+		return r.liveState(ctx)
+	case readResult:
+		return r.finishedState(ctx)
+	default:
+		return nil
+	}
+}
+
+// rolloutRead is how a rollout's state may be obtained for a given execution
+// status.
+type rolloutRead int
+
+const (
+	// readNothing: there is no state worth showing, and nothing safe to read.
+	readNothing rolloutRead = iota
+	// readQuery: ask the running coordinator.
+	readQuery
+	// readResult: take the state the coordinator returned, from history.
+	readResult
+)
+
+// readFor maps an execution status to how its state may be read.
+//
+// Pure and separate because the rule it encodes is easy to get wrong and
+// expensive when wrong: only a RUNNING execution may be queried. Querying a
+// closed one replays its whole history on a worker, so a coordinator whose
+// command sequence has changed since that history was written panics on every
+// poll.
+func readFor(status enumspb.WorkflowExecutionStatus) rolloutRead {
+	switch status {
+	case enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING:
+		return readQuery
+	case enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED:
+		return readResult
+	default:
+		// Terminated, failed, timed out, cancelled or continued-as-new: no
+		// result to decode, and querying would mean replaying.
+		return readNothing
+	}
+}
+
+// liveState queries the running coordinator.
+func (r *rolloutController) liveState(ctx context.Context) *rollout.State {
+	value, err := r.c.QueryWorkflow(ctx, rollout.WorkflowID, "", rollout.QueryGetState)
+	if err != nil {
+		// Includes the narrow race where the rollout closed between the
+		// Describe above and this Query.
+		r.logger.Debug("cannot query rollout state", "err", err)
+		return nil
+	}
+
+	var state rollout.State
 	if err := value.Get(&state); err != nil {
 		r.logger.Debug("cannot decode rollout state", "err", err)
 		return nil
 	}
-
-	// Only worth a second call when the answer claims to be live; a rollout
-	// that already reports a terminal phase needs no confirming.
-	if !state.Phase.Terminal() {
-		state = orphaned(state, r.running(ctx))
-	}
-
 	return &state
 }
 
-// orphaned rewrites a live-looking rollout whose coordinator has stopped.
-//
-// Kept separate and pure because the trap it handles is not obvious: the state
-// being rewritten is a truthful answer from the Workflow, just a frozen one.
-func orphaned(state rollout.State, running bool) rollout.State {
-	if running {
-		return state
+// finishedState reads a completed rollout's returned state from history.
+func (r *rolloutController) finishedState(ctx context.Context) *rollout.State {
+	var state rollout.State
+	if err := r.c.GetWorkflow(ctx, rollout.WorkflowID, "").Get(ctx, &state); err != nil {
+		r.logger.Debug("cannot read finished rollout result", "err", err)
+		return nil
 	}
-
-	was := state.Phase
-	state.Phase = rollout.PhaseAborted
-	state.HoldRemainingSec = 0
-	state.Message = fmt.Sprintf(
-		"stopped outside the dashboard — the coordinator for %s is no longer running, and its last state was %q",
-		state.TargetVersion, was)
-	return state
+	return &state
 }
 
 // running reports whether the rollout coordinator is still executing.
