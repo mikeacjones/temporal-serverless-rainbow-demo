@@ -506,7 +506,9 @@ select { width: 100%; }
 /* The stack itself. Margin rather than gap, because gap cannot be animated
  * and the collapse of a leaving ticket's own box is what pulls the orders
  * below it upwards. */
-.order-stack { display: flex; flex-direction: column; min-height: 4px; }
+/* Clipped, so a card leaving through the top of the stack is cut off by the
+ * column edge rather than floating over the version card above it. */
+.order-stack { display: flex; flex-direction: column; min-height: 4px; overflow: hidden; }
 
 .otick {
   --otick-h: 42px;
@@ -521,13 +523,13 @@ select { width: 100%; }
   border-radius: var(--radius-lg);
   /* Transitioned, not keyframed: the ticket has to animate *to* zero height
    * so its neighbours slide up rather than snapping into the gap. */
-  transition:
-    max-height 360ms cubic-bezier(0.4, 0, 0.2, 1),
-    margin-bottom 360ms cubic-bezier(0.4, 0, 0.2, 1),
-    padding 360ms cubic-bezier(0.4, 0, 0.2, 1),
-    opacity 260ms ease-out,
-    transform 260ms ease-out,
-    border-color 200ms ease-out;
+  /* One duration for every property, set from script so a queue of finished
+   * orders can be cleared faster than a single one. Everything moves together
+   * on purpose: the card must be gone at the moment the card below it becomes
+   * the new top, not before and not after. */
+  transition-property: max-height, margin-bottom, padding, opacity, transform, border-color, background;
+  transition-duration: var(--depart, 420ms);
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* Arrivals fade in from the bottom, so a new order reads as having joined
@@ -544,14 +546,26 @@ select { width: 100%; }
   background: color-mix(in srgb, var(--trouble) 7%, transparent);
 }
 
-/* Leaving: flash to the live colour, then collapse to nothing. */
-.otick-leaving {
+/* Finished, but not yet at the front of the queue: it greys out and waits its
+ * turn. Only the top card ever leaves, so a run of finished orders is visible
+ * as a grey block working its way up. */
+.otick-done {
+  opacity: 0.5;
+  border-left-color: var(--ink-faint);
+  background: color-mix(in srgb, var(--surface-lowest) 70%, transparent);
+}
+.otick-done .otick-id, .otick-done .otick-step, .otick-done .otick-age { color: var(--ink-faint); }
+
+/* Departing: rises up out of the column while its own box collapses, so the
+ * cards below travel into the space it leaves rather than snapping into it.
+ * The translate is what makes it read as leaving through the top; the collapse
+ * is what moves everything else. */
+.otick-departing {
   max-height: 0;
   margin-bottom: 0;
   padding-top: 0; padding-bottom: 0;
   opacity: 0;
-  transform: translateX(8px);
-  border-left-color: var(--cyan);
+  transform: translateY(-18px);
   pointer-events: none;
 }
 
@@ -577,8 +591,8 @@ select { width: 100%; }
 /* Removal is driven by a timer, so with motion reduced the ticket dims for
  * the same interval and then goes. */
 @media (prefers-reduced-motion: reduce) {
-  .otick { transition: opacity 200ms linear; }
-  .otick-leaving { max-height: 0; opacity: 0; transform: none; }
+  .otick { transition-property: opacity; transition-duration: 160ms; }
+  .otick-departing { max-height: 0; opacity: 0; transform: none; }
   .otick-arriving { animation: none; }
 }
 

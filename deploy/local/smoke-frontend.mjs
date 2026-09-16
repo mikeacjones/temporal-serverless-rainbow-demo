@@ -97,6 +97,16 @@ globalThis.window = { location: { origin: 'http://localhost', pathname: '/' }, a
 globalThis.location = globalThis.window.location;
 globalThis.EventSource = class { addEventListener() {} close() {} };
 globalThis.requestAnimationFrame = (fn) => fn();
+
+// Departure timers are counted, so a departure being started twice for the
+// same card is visible. The real setTimeout still runs; only the bookkeeping
+// is added.
+const departTimers = [];
+const realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...rest) => {
+  if (ms === 420 || ms === 150) departTimers.push(ms);
+  return realSetTimeout(fn, ms, ...rest);
+};
 // The page fetches once on load; the smoke test drives render() itself.
 globalThis.fetch = () => Promise.reject(new Error('smoke test: no network'));
 
@@ -112,7 +122,7 @@ console.error = (...args) => {
 };
 
 const src = fs.readFileSync(path.join(root, 'frontend/app.js'), 'utf8');
-const load = new Function(`${src}\nreturn { render };`);
+const load = new Function(`${src}\nreturn { render, columnOrder, departing };`);
 
 let api;
 try {
@@ -172,3 +182,92 @@ if (stuck !== expectedStuck) {
 
 console.log(`render OK — ${columns.length} columns [${shape.join(' ')}], ` +
   `${tickets} tickets, ${stuck} stuck`);
+
+// --- the departure contract -------------------------------------------------
+//
+// Only the top card of a column may leave. A finished order further down greys
+// out and waits its turn, so a run of them reads as a block moving up to the
+// front. Getting this wrong is what made the old version look jumpy: cards
+// vanished from the middle of the stack, which is invisible when every card
+// looks alike.
+function order(id, version, done) {
+  return {
+    orderId: id, version, step: 'Prep', status: done ? 'Completed' : 'Running',
+    degraded: false, done, elapsedSec: 4,
+  };
+}
+
+const staged = JSON.parse(JSON.stringify(snapshot));
+staged.orders = [
+  // v1: two finished at the front, then a live one.
+  order('ord-000001', 'v1', true),
+  order('ord-000002', 'v1', true),
+  order('ord-000003', 'v1', false),
+  // v2: a live order at the front, with a finished one stuck behind it.
+  order('ord-000010', 'v2', false),
+  order('ord-000011', 'v2', true),
+];
+
+departTimers.length = 0;
+
+// Rendered twice on purpose. Snapshots arrive about once a second while a
+// departure takes 420ms, so the same card is re-rendered mid-flight — and it
+// must not be sent on its way a second time.
+try {
+  api.render(staged);
+  api.render(staged);
+} catch (err) {
+  console.error('render() threw on the departure fixture:', err.stack || err.message);
+  process.exit(1);
+}
+
+const cols = new Map(
+  document.getElementById('order-columns').children.map((c) => [c.children[0].children[0].textContent, c.children[1]]),
+);
+
+const cls = (stack, i) => (stack.children[i] ? stack.children[i].className : '<missing>');
+const problems = [];
+
+const v1 = cols.get('v1');
+if (!cls(v1, 0).includes('otick-departing')) {
+  problems.push(`v1 top card is finished but not departing: "${cls(v1, 0)}"`);
+}
+if (cls(v1, 1).includes('otick-departing')) {
+  problems.push('v1 second card is departing; only the top card may leave');
+}
+if (!cls(v1, 1).includes('otick-done')) {
+  problems.push(`v1 second card is finished but not greyed: "${cls(v1, 1)}"`);
+}
+
+const v2 = cols.get('v2');
+if (cls(v2, 0).includes('otick-departing')) {
+  problems.push('v2 top card is still running but is departing');
+}
+if (cls(v2, 1).includes('otick-departing')) {
+  problems.push('v2 finished card departed from behind a running order');
+}
+if (!cls(v2, 1).includes('otick-done')) {
+  problems.push(`v2 finished card is not greyed: "${cls(v2, 1)}"`);
+}
+
+// One departure per column at a time, or two cards would animate over
+// each other and the stack would appear to jump.
+if (api.departing.get('v1') !== 'ord-000001') {
+  problems.push(`v1 is departing ${api.departing.get('v1')}, want the top card`);
+}
+if (api.departing.has('v2')) {
+  problems.push('v2 has a departure in flight with a running order at the front');
+}
+
+if (departTimers.length !== 1) {
+  problems.push(`${departTimers.length} departures were started across two renders, want 1 — ` +
+    'a card already leaving must not be restarted');
+}
+
+if (problems.length) {
+  for (const p of problems) console.error('  ' + p);
+  console.error(`${problems.length} departure rule(s) broken`);
+  process.exit(1);
+}
+
+console.log('departure OK — top card leaves, finished cards behind it wait and grey');

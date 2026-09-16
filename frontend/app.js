@@ -851,13 +851,24 @@ function renderColumns(s) {
   );
 }
 
-// leaveMs is how long a finished order takes to collapse out of its column.
+// departMs is how long one card takes to rise out of the top of its column.
 //
-// It must outlast the .otick-leaving transition. Remove the node any sooner
-// and the orders below it jump into the gap instead of sliding up, which is
-// the whole point of animating the exit: one order leaving a stack of
-// identical-looking orders is invisible unless the rest visibly move.
-const leaveMs = 420;
+// It is also how long the cards below take to travel up into the space, since
+// both are the same transition — the card has to be gone at the moment the one
+// below becomes the new top, which is what makes the queue read as moving
+// rather than as holes opening and closing.
+const departMs = 420;
+
+// departFastMs clears a backlog of finished orders without stalling.
+//
+// Departures are serialised through the top of the stack, so at one every
+// 420ms a burst finishing together would queue up as a growing block of grey.
+// When several are already waiting the queue is run down quickly instead, so
+// it still reads as movement rather than as a column that has stopped.
+const departFastMs = 150;
+
+// departQueued is how many waiting finished orders switch to the fast rate.
+const departQueued = 4;
 
 // columnMax caps how many tickets one column draws.
 //
@@ -869,6 +880,21 @@ const columnMax = 14;
 
 const seatedNodes = new Map(); // order ID -> its ticket element
 const columnNodes = new Map(); // version label -> its column parts
+
+// columnOrder is what each column is currently showing, oldest first.
+//
+// Kept outside the render pass because departures cascade on their own clock:
+// when one card leaves, the next may already be finished and should follow
+// immediately rather than waiting for the next snapshot.
+const columnOrder = new Map(); // version label -> [order ID]
+
+// departing names the one card currently leaving each column. Only the top
+// card ever leaves, so everything behind it waits its turn.
+const departing = new Map(); // version label -> order ID
+
+// finished remembers which orders have completed, so a departure can be
+// decided between snapshots.
+const finished = new Set();
 
 // retired holds orders that have finished and collapsed away.
 //
@@ -904,7 +930,10 @@ function drawColumns(s, orders, filter) {
     }
   }
   for (const id of retired) {
-    if (!byId.has(id)) retired.delete(id);
+    if (!byId.has(id)) {
+      retired.delete(id);
+      finished.delete(id);
+    }
   }
 
   // Group by version, oldest first. Order IDs are zero-padded and monotonic
@@ -942,23 +971,17 @@ function drawColumns(s, orders, filter) {
       }
       updateOtick(node, order, s.pipelines || {});
 
-      // A finished order collapses out, keeping its height while it fades so
-      // the stack below it slides rather than snaps.
-      if (order.done && !node.dataset.leaving) {
-        node.dataset.leaving = '1';
-        // Two frames: the browser needs the ticket laid out at full height
-        // before the transition to zero has anything to animate from.
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          node.classList.add('otick-leaving');
-        }));
-        setTimeout(() => retired.add(order.orderId), leaveMs);
-      }
+      if (order.done) finished.add(order.orderId);
 
       children.push(node);
       showing += 1;
     }
 
     parts.stack.replaceChildren(...children);
+    columnOrder.set(label, visible.map((o) => o.orderId));
+    // Departures are driven from here but run on their own clock, so a run of
+    // finished orders leaves one after another without waiting for snapshots.
+    depart(label);
     parts.count.textContent = bucket.length ? `${bucket.length} shown` : '';
     parts.more.textContent = hidden > 0 ? `+${hidden} more in flight` : '';
     parts.empty.textContent = bucket.length ? '' : 'idle';
@@ -973,6 +996,54 @@ function drawColumns(s, orders, filter) {
 
   drawnOnce = true;
   return showing;
+}
+
+// depart sends the top card of a column on its way, if it has finished.
+//
+// Only the top card leaves. A finished order further down greys out and waits,
+// so a run of them is visible as a grey block working its way up to the front
+// — which is the whole reason the exit is worth animating. When one has gone,
+// the next is checked immediately: if it is also finished it follows straight
+// away rather than waiting for the next snapshot.
+function depart(label) {
+  if (departing.has(label)) return;
+
+  const ids = columnOrder.get(label) || [];
+  const head = ids[0];
+  if (!head || !finished.has(head)) return;
+
+  const node = seatedNodes.get(head);
+  if (!node) return;
+
+  // How many are already queued behind this one decides the pace, so a burst
+  // that finishes together does not crawl out one card at a time.
+  const queued = ids.filter((id) => finished.has(id)).length;
+  const ms = queued >= departQueued ? departFastMs : departMs;
+
+  departing.set(label, head);
+  node.dataset.departing = '1';
+  node.style.setProperty('--depart', ms + 'ms');
+
+  // Two frames: the browser needs the card laid out at its full height before
+  // a transition to zero has anything to animate from.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    node.classList.add('otick-departing');
+  }));
+
+  setTimeout(() => {
+    retired.add(head);
+    node.remove();
+    seatedNodes.delete(head);
+    departing.delete(label);
+
+    // Drop it locally so the next card is already the head, without waiting
+    // for a snapshot to tell us.
+    const list = columnOrder.get(label) || [];
+    const at = list.indexOf(head);
+    if (at !== -1) list.splice(at, 1);
+
+    depart(label);
+  }, ms);
 }
 
 // column returns one version's column, building it on first use.
@@ -1026,9 +1097,13 @@ function otick(order, pipelines) {
 // thing showing the order is alive.
 function updateOtick(node, order, pipelines) {
   const done = order.done;
-  if (!node.dataset.leaving) {
+
+  // A card already on its way out is left alone: rewriting its classes would
+  // drop otick-departing mid-transition and the card would snap back.
+  if (!node.dataset.departing) {
     node.className = 'otick' +
       (node.classList.contains('otick-arriving') ? ' otick-arriving' : '') +
+      (done ? ' otick-done' : '') +
       (order.degraded ? ' otick-stuck' : '');
   }
 
