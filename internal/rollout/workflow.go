@@ -68,31 +68,13 @@ func Rollout(ctx workflow.Context, in Input) (State, error) {
 	if in.Gate.Enabled {
 		touch(ctx, state, PhaseGating, fmt.Sprintf("running %d canary orders on %s", in.Gate.Orders, in.TargetVersion))
 
-		gateCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			// Generous: the activity itself bounds the gate by in.Gate.Timeout.
-			StartToCloseTimeout: in.Gate.Timeout + time.Minute,
-			HeartbeatTimeout:    30 * time.Second,
-			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
-		})
-		err := workflow.ExecuteActivity(gateCtx, ActivityRunGate, GateRequest{
-			BuildID: state.TargetBuildID,
-			Label:   in.TargetVersion,
-			Orders:  in.Gate.Orders,
-			Timeout: in.Gate.Timeout,
-			Chaos:   in.GateChaos,
-		}).Get(gateCtx, &state.Gate)
-
-		if err != nil || !state.Gate.Passed {
-			detail := state.Gate.Detail
-			if err != nil {
-				// The Activity failed rather than reporting a verdict; record
-				// that the gate ran so the UI shows where it stopped.
-				state.Gate.Ran = true
-				detail = err.Error()
-			}
+		// One child Workflow per probe, all awaited. Their failures are the
+		// gate's verdict, so runGate reports rather than fails.
+		state.Gate = runGate(ctx, in, state.TargetBuildID)
+		if !state.Gate.Passed {
 			// No rollback needed: the routing was never changed.
 			return *finish(ctx, state, PhaseGateFailed,
-				fmt.Sprintf("canary gate failed on %s, no traffic was moved: %s", in.TargetVersion, detail)), nil
+				fmt.Sprintf("canary gate failed on %s, no traffic was moved: %s", in.TargetVersion, state.Gate.Detail)), nil
 		}
 		touch(ctx, state, PhaseGating, fmt.Sprintf("canary gate passed on %s", in.TargetVersion))
 	}

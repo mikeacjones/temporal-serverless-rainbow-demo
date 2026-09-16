@@ -2,6 +2,10 @@ package rollout
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,8 +117,8 @@ func (stubs) SetRamp(context.Context, RampRequest) error           { return nil 
 func (stubs) SetCurrent(context.Context, string) error             { return nil }
 func (stubs) ClearRamp(context.Context) error                      { return nil }
 func (stubs) RestoreRouting(context.Context, deploy.Routing) error { return nil }
-func (stubs) RunGate(context.Context, GateRequest) (GateResult, error) {
-	return GateResult{}, nil
+func (stubs) RunProbe(context.Context, ProbeRequest) (ProbeResult, error) {
+	return ProbeResult{}, nil
 }
 func (stubs) SampleHealth(context.Context, HealthRequest) (metrics.Health, error) {
 	return metrics.Health{}, nil
@@ -127,6 +131,7 @@ func newRolloutEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflowWithOptions(Rollout, workflowRegisterOptions())
+	env.RegisterWorkflowWithOptions(GateProbe, gateProbeRegisterOptions())
 
 	s := stubs{}
 	register := map[string]any{
@@ -136,7 +141,7 @@ func newRolloutEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 		ActivitySetCurrent:      s.SetCurrent,
 		ActivityClearRamp:       s.ClearRamp,
 		ActivityRestoreRouting:  s.RestoreRouting,
-		ActivityRunGate:         s.RunGate,
+		ActivityRunProbe:        s.RunProbe,
 		ActivitySampleHealth:    s.SampleHealth,
 	}
 	for name, fn := range register {
@@ -165,9 +170,10 @@ func TestGateFailureMovesNoTraffic(t *testing.T) {
 	env.OnActivity(ActivitySnapshotRouting, mock.Anything).Return(deploy.Routing{
 		CurrentBuildID: "build-v1", CurrentLabel: "v1",
 	}, nil)
-	env.OnActivity(ActivityRunGate, mock.Anything, mock.Anything).Return(GateResult{
-		Ran: true, Passed: false, Probes: 2, Failures: 2, Detail: "payment always fails",
-	}, nil)
+	env.OnActivity(ActivityRunProbe, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req ProbeRequest) (ProbeResult, error) {
+			return ProbeResult{}, errors.New("payment always fails")
+		})
 
 	env.ExecuteWorkflow(Rollout, testInput("v4"))
 
@@ -197,9 +203,10 @@ func TestHealthyRolloutCompletesAndPromotes(t *testing.T) {
 	env.OnActivity(ActivitySnapshotRouting, mock.Anything).Return(deploy.Routing{
 		CurrentBuildID: "build-v1", CurrentLabel: "v1",
 	}, nil)
-	env.OnActivity(ActivityRunGate, mock.Anything, mock.Anything).Return(GateResult{
-		Ran: true, Passed: true, Probes: 2,
-	}, nil)
+	env.OnActivity(ActivityRunProbe, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req ProbeRequest) (ProbeResult, error) {
+			return ProbeResult{OrderID: req.OrderID, Version: req.Label}, nil
+		})
 	env.OnActivity(ActivitySetRamp, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(ActivitySampleHealth, mock.Anything, mock.Anything).Return(metrics.Health{
 		Completed: 100, Samples: 100, ErrorRatePct: 0,
@@ -231,9 +238,10 @@ func TestUnhealthyRampRollsBack(t *testing.T) {
 
 	env.OnActivity(ActivityResolveVersion, mock.Anything, "v5").Return("build-v5", nil)
 	env.OnActivity(ActivitySnapshotRouting, mock.Anything).Return(previous, nil)
-	env.OnActivity(ActivityRunGate, mock.Anything, mock.Anything).Return(GateResult{
-		Ran: true, Passed: true, Probes: 2,
-	}, nil)
+	env.OnActivity(ActivityRunProbe, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req ProbeRequest) (ProbeResult, error) {
+			return ProbeResult{OrderID: req.OrderID, Version: req.Label}, nil
+		})
 	env.OnActivity(ActivitySetRamp, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity(ActivitySampleHealth, mock.Anything, mock.Anything).Return(metrics.Health{
 		Degraded: 20, Samples: 20, ErrorRatePct: 100,
@@ -268,6 +276,112 @@ func TestUnknownVersionAbortsBeforeTouchingRouting(t *testing.T) {
 	}
 	if state.Phase != PhaseAborted {
 		t.Errorf("phase = %q, want %q", state.Phase, PhaseAborted)
+	}
+	env.AssertNotCalled(t, ActivitySetRamp, mock.Anything, mock.Anything)
+}
+
+// The gate must fan out one child Workflow per configured probe, and must wait
+// for all of them. A probe whose future is never read is a gate that passes by
+// omission, so the count is the assertion that matters here.
+func TestGateFansOutOneChildPerProbe(t *testing.T) {
+	env := newRolloutEnv(t)
+
+	var mu sync.Mutex
+	var seen []string
+
+	env.OnActivity(ActivityResolveVersion, mock.Anything, "v2").Return("build-v2", nil)
+	env.OnActivity(ActivitySnapshotRouting, mock.Anything).Return(deploy.Routing{
+		CurrentBuildID: "build-v1", CurrentLabel: "v1",
+	}, nil)
+	env.OnActivity(ActivityRunProbe, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req ProbeRequest) (ProbeResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			seen = append(seen, req.OrderID)
+			return ProbeResult{OrderID: req.OrderID, Version: req.Label}, nil
+		})
+	env.OnActivity(ActivitySetRamp, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(ActivitySampleHealth, mock.Anything, mock.Anything).Return(metrics.Health{
+		Completed: 100, Samples: 100, ErrorRatePct: 0,
+	}, nil)
+	env.OnActivity(ActivitySetCurrent, mock.Anything, "build-v2").Return(nil)
+	env.OnActivity(ActivityClearRamp, mock.Anything).Return(nil)
+
+	in := testInput("v2")
+	in.Gate.Orders = 4
+	env.ExecuteWorkflow(Rollout, in)
+
+	var state State
+	if err := env.GetWorkflowResult(&state); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 4 {
+		t.Fatalf("ran %d probes (%v), want 4", len(seen), seen)
+	}
+	// Distinct, and each naming the version under test, so two probes can never
+	// dedupe onto one Workflow ID and silently halve the gate.
+	unique := map[string]bool{}
+	for _, id := range seen {
+		if unique[id] {
+			t.Errorf("probe ID %q was reused", id)
+		}
+		unique[id] = true
+		if !strings.Contains(id, "v2") {
+			t.Errorf("probe ID %q does not name the candidate version", id)
+		}
+	}
+	if state.Gate.Probes != 4 || !state.Gate.Passed {
+		t.Errorf("gate = %+v, want 4 passing probes", state.Gate)
+	}
+}
+
+// One bad probe out of several is still a failed gate. The gate is a
+// unanimity check, not a majority vote.
+func TestOneFailedProbeFailsTheWholeGate(t *testing.T) {
+	env := newRolloutEnv(t)
+
+	env.OnActivity(ActivityResolveVersion, mock.Anything, "v4").Return("build-v4", nil)
+	env.OnActivity(ActivitySnapshotRouting, mock.Anything).Return(deploy.Routing{
+		CurrentBuildID: "build-v1", CurrentLabel: "v1",
+	}, nil)
+	env.OnActivity(ActivityRunProbe, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, req ProbeRequest) (ProbeResult, error) {
+			if strings.HasSuffix(req.OrderID, "-02") {
+				return ProbeResult{}, fmt.Errorf("Roast for order %s: roast step never finished", req.OrderID)
+			}
+			return ProbeResult{OrderID: req.OrderID, Version: req.Label}, nil
+		})
+
+	in := testInput("v4")
+	in.Gate.Orders = 3
+	env.ExecuteWorkflow(Rollout, in)
+
+	var state State
+	if err := env.GetWorkflowResult(&state); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if state.Phase != PhaseGateFailed {
+		t.Fatalf("phase = %q (%s), want %q", state.Phase, state.Message, PhaseGateFailed)
+	}
+	if state.Gate.Failures != 1 {
+		t.Errorf("failures = %d, want 1", state.Gate.Failures)
+	}
+	// The detail is what the dashboard shows, so it must name the failed probe
+	// and the real cause — not the SDK's child-Workflow wrapper, which carries
+	// run and event IDs that belong in the Temporal UI instead.
+	if !strings.Contains(state.Gate.Detail, "roast step never finished") {
+		t.Errorf("detail %q should say why the probe failed", state.Gate.Detail)
+	}
+	if !strings.Contains(state.Gate.Detail, "probe 2 of 3") {
+		t.Errorf("detail %q should name which probe failed", state.Gate.Detail)
+	}
+	for _, noise := range []string{"initiatedEventID", "runID", "child workflow execution error"} {
+		if strings.Contains(state.Gate.Detail, noise) {
+			t.Errorf("detail %q leaks SDK wrapper detail (%q)", state.Gate.Detail, noise)
+		}
 	}
 	env.AssertNotCalled(t, ActivitySetRamp, mock.Anything, mock.Anything)
 }

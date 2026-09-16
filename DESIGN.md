@@ -23,7 +23,7 @@ Two headline additions over the source demos:
 | Decision | Choice |
 | --- | --- |
 | Runtime | Hybrid: local dev-server for iteration, Temporal Cloud + Lambda Serverless Workers for the live run. Same binaries, env-switched. |
-| Canary gate | A gate Workflow **pinned to the candidate Build ID**, mirroring temporal-worker-controller's `gate`. Ramping cannot begin unless it succeeds. |
+| Canary gate | `GateProbe` **child Workflows fanned out** from the rollout and awaited, one per probe, each running an order **pinned to the candidate Build ID** — mirroring temporal-worker-controller's `gate`. Ramping cannot begin unless every probe succeeds. |
 | Traffic engine | `TrafficDirectorWorkflow` — a long-running Workflow holding target rate as mutable state, driven by Updates. |
 | Bad versions | Per-order **chaos injection stamped at start time**, targetable at any version. Any version can be the villain. |
 | Language / stack | Go, single module. **Backend is a pure JSON + SSE API and renders no HTML**; the dashboard is a standalone static frontend in its own nginx container. Requested explicitly, and a better split than the versioning demo's server-rendered HTMX fragments, which put markup inside Go. |
@@ -214,7 +214,7 @@ returns a clean "rollout already in progress" instead of racing.
 | --- | --- |
 | `SnapshotRouting` | `DescribeWorkerDeployment` — captures pre-rollout Current/Ramping for rollback |
 | `ResolveVersion(label)` | `DescribeVersion` metadata → Build ID |
-| `RunGate(buildID, n, timeout)` | Starts *n* gate Workflows **pinned** to the candidate, waits for success |
+| `RunProbe(buildID, orderID, timeout)` | Starts **one** order **pinned** to the candidate and waits for it; one per `GateProbe` child |
 | `SetRamp(buildID, pct)` | `SetRampingVersion` (`AllowNoPollers`, `IgnoreMissingTaskQueues`) |
 | `SetCurrent(buildID)` | `SetCurrentVersion` |
 | `ClearRamp` | `SetRampingVersion` with empty Build ID + `Percentage: 0` |
@@ -231,6 +231,42 @@ gRPC request does:
 `StartPinned()` helper that encodes payloads through the data
 converter. This is the same override the versioning demo applies
 *post-reset*; here it is applied *at start*.
+
+### The gate is fanned-out child Workflows — and why the pin stays in an Activity
+
+`runGate` starts one `GateProbe` child Workflow per probe, collects the
+futures, and only then awaits them. Every future is read: **a failed child
+does not fail its parent**, so an unawaited probe is a gate that passes by
+omission. Two tests pin this down — one asserts a child per configured
+probe with distinct IDs, one asserts that a single failed probe fails the
+whole gate. Both were confirmed to fail when the await is removed.
+
+What this buys over the single `RunGate` Activity it replaces:
+
+- Each probe has its own Workflow ID, history and outcome. A failed probe
+  is a **failed Workflow you can open**, not a line in the rollout's history.
+- The rollout shows up in the UI as a parent with one child per probe.
+- `ParentClosePolicy` is left at the default **`TERMINATE`**, so aborting or
+  terminating a rollout stops the probes it started. The old Activity left
+  its canary orders running against a candidate nobody was watching.
+- Probe IDs mix in the rollout's **Run ID**, not just its Workflow ID. The
+  coordinator is a singleton (`rollout-<deployment>`), so IDs derived from
+  the Workflow ID alone would have a second rollout of the same version
+  dedupe onto the first one's long-finished probes and pass without testing
+  anything.
+
+The probes are children; **the pinned order inside each probe is not.**
+`ChildWorkflowOptions` exposes no versioning override — only the
+deprecated `VersioningIntent` ("Deprecated: Build-id based versioning is
+deprecated in favor of worker deployment based versioning"), checked
+against **SDK v1.48.0 and v1.49.0**. The wire protocol does have the
+field — `StartChildWorkflowExecutionCommandAttributes.VersioningOverride`
+(field 19) — but the Go SDK does not surface it. Since an unpinned child
+would be routed by the deployment's *Current* config, it would exercise
+whatever is already live rather than the candidate, which defeats the
+gate entirely. So each `GateProbe` starts its pinned order through
+`StartPinned` in an Activity. If the SDK ever exposes field 19, the
+Activity collapses into a child Workflow and `GateProbe` disappears.
 
 ### Health sampling — verified search attributes
 
@@ -275,7 +311,7 @@ demo material.
 | Queue | Workers | Versioned |
 | --- | --- | --- |
 | `orders` | All N order workers (v1…v5) + the gate Workflow type | Yes — Pinned |
-| `control` | Rollout coordinator, traffic director, their activities | No |
+| `control` | Rollout coordinator, its fanned-out `GateProbe` children, traffic director, their activities | No |
 
 ---
 
@@ -352,7 +388,7 @@ cmd/worker/          versioned order worker (ORDER_VERSION selects the shape)
 cmd/controlworker/   unversioned control-plane worker (rollout + traffic)
 cmd/lambdaworker/    Lambda entrypoint around the versioned worker
 internal/orders/     the five Workflow shapes, activities, chaos, types
-internal/rollout/    RolloutWorkflow, gate Workflow, activities
+internal/rollout/    RolloutWorkflow, GateProbe child Workflow, activities
 internal/traffic/    TrafficDirectorWorkflow, StartOrderBatch
 internal/deploy/     Worker Deployment API wrapper, label resolver, StartPinned
 internal/dashboard/  state model, poller, SSE hub, render, actions, server
@@ -405,8 +441,9 @@ which is the whole point of a gate.
 originally heartbeated once before waiting on each canary order. A canary
 order takes longer than the heartbeat timeout, so the Activity died of a
 heartbeat timeout while the orders it was watching completed
-successfully — blocking a *healthy* deploy. It now waits on all probes
-concurrently and heartbeats on a ticker.
+successfully — blocking a *healthy* deploy. `RunProbe` now heartbeats on
+a ticker while waiting, and the concurrency comes from the fan-out: one
+probe per child Workflow, all started before any is awaited.
 
 **Eager activity dispatch hides the whole scale story.** With it on,
 Activity tasks go straight to the worker that completed the Workflow
