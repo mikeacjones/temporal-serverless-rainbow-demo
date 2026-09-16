@@ -67,16 +67,16 @@ type Snapshot struct {
 // History holds the series behind the sparklines.
 type History struct {
 	Backlog         []int64   `json:"backlog"`
-	Pollers         []int     `json:"pollers"`
+	Workers         []int     `json:"workers"`
 	Running         []int64   `json:"running"`
 	CompletedPerMin []float64 `json:"completedPerMin"`
 	OldestWaitSec   []float64 `json:"oldestWaitSec"`
 	SyncMatchPct    []float64 `json:"syncMatchPct"`
 
-	// PollersByVersion is one worker-count series per version, so each
+	// WorkersByVersion is one running-worker series per version, so each
 	// version card can show its own workers arriving and leaving rather than
 	// only the fleet total.
-	PollersByVersion map[string][]int `json:"pollersByVersion,omitempty"`
+	WorkersByVersion map[string][]int `json:"workersByVersion,omitempty"`
 }
 
 // pushVersions records each version's current worker count.
@@ -84,18 +84,18 @@ type History struct {
 // Versions that are no longer registered are dropped, so a demo that runs for
 // hours does not accumulate series for versions that have been deleted.
 func (h *History) pushVersions(versions []deploy.Version) {
-	if h.PollersByVersion == nil {
-		h.PollersByVersion = map[string][]int{}
+	if h.WorkersByVersion == nil {
+		h.WorkersByVersion = map[string][]int{}
 	}
 
 	registered := make(map[string]bool, len(versions))
 	for _, v := range versions {
 		registered[v.Label] = true
-		h.PollersByVersion[v.Label] = appendCapped(h.PollersByVersion[v.Label], v.Pollers)
+		h.WorkersByVersion[v.Label] = appendCapped(h.WorkersByVersion[v.Label], v.Workers)
 	}
-	for label := range h.PollersByVersion {
+	for label := range h.WorkersByVersion {
 		if !registered[label] {
-			delete(h.PollersByVersion, label)
+			delete(h.WorkersByVersion, label)
 		}
 	}
 }
@@ -103,7 +103,7 @@ func (h *History) pushVersions(versions []deploy.Version) {
 // push appends a sample, discarding the oldest once full.
 func (h *History) push(c metrics.Capacity, t metrics.Totals, completedPerMin float64, syncMatchPct float64) {
 	h.Backlog = appendCapped(h.Backlog, c.BacklogDepth)
-	h.Pollers = appendCapped(h.Pollers, c.Pollers)
+	h.Workers = appendCapped(h.Workers, c.Workers)
 	h.Running = appendCapped(h.Running, t.Running)
 	h.CompletedPerMin = appendCapped(h.CompletedPerMin, completedPerMin)
 	h.OldestWaitSec = appendCapped(h.OldestWaitSec, c.OldestWaitSec)
@@ -227,6 +227,25 @@ func (s *Server) build(ctx context.Context) *Snapshot {
 			}
 			return
 		}
+
+		// Running workers come from a separate call, because the task queue
+		// response cannot answer it: PollerInfo carries no status, so a
+		// finished serverless invocation is indistinguishable from a live one
+		// there.
+		workers, err := s.reader.RunningWorkers(ctx, orders.TaskQueue)
+		if err != nil {
+			// A server without worker heartbeats cannot report status. Falling
+			// back to pollers overstates the fleet while things shut down, but
+			// showing nothing would be worse — and on a long-lived worker,
+			// where nothing is constantly shutting down, the two agree.
+			s.logger.Debug("running workers unavailable, falling back to pollers", "err", err)
+			capacity.Workers = capacity.Pollers
+			capacity.WorkersByBuild = capacity.PollersByBuild
+		} else {
+			capacity.Workers = workers.Total
+			capacity.WorkersByBuild = workers.ByBuild
+		}
+
 		snapshot.Capacity = capacity
 	})
 
@@ -267,11 +286,11 @@ func (s *Server) build(ctx context.Context) *Snapshot {
 	// the versions are read together, and behind a short cache.
 	snapshot.Health = s.versionHealth(ctx, snapshot.Deployment.Versions, previous)
 
-	attachPollers(snapshot)
+	attachWorkers(snapshot)
 	applySplit(snapshot)
 
 	s.history.push(snapshot.Capacity, snapshot.Totals, snapshot.CompletedPerMin, snapshot.SyncMatch.RatePct)
-	// After attachPollers, so each version's count is the one just read.
+	// After attachWorkers, so each version's count is the one just read.
 	s.history.pushVersions(snapshot.Deployment.Versions)
 	snapshot.History = *s.history
 
@@ -334,17 +353,17 @@ func (s *Server) versionHealth(
 	return out
 }
 
-// attachPollers tells each version card how many workers it currently has.
+// attachWorkers tells each version card how many workers it currently has.
 //
 // This is the serverless story made per-version: dump orders onto an idle
 // version and its count climbs from zero while the others stay put.
-func attachPollers(snapshot *Snapshot) {
-	byBuild := snapshot.Capacity.PollersByBuild
+func attachWorkers(snapshot *Snapshot) {
+	byBuild := snapshot.Capacity.WorkersByBuild
 	if byBuild == nil {
 		return
 	}
 	for i, v := range snapshot.Deployment.Versions {
-		snapshot.Deployment.Versions[i].Pollers = byBuild[v.BuildID]
+		snapshot.Deployment.Versions[i].Workers = byBuild[v.BuildID]
 	}
 }
 

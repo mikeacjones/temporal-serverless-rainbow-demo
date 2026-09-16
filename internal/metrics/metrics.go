@@ -216,6 +216,18 @@ type Capacity struct {
 	// life. Every poller carries its own deployment options, so this is a
 	// regrouping of a response already being fetched — not extra calls.
 	PollersByBuild map[string]int `json:"pollersByBuild,omitempty"`
+
+	// Workers counts only the workers the server reports as Running, and is
+	// what the dashboard shows. It is not interchangeable with Pollers: a
+	// finished serverless invocation lingers as ShuttingDown for minutes, and
+	// its pollers linger with it, so the poller count overstates the live
+	// fleet. Poller autoscaling widens the gap again, because pollers per
+	// worker is no longer fixed at one.
+	Workers int `json:"workers"`
+
+	// WorkersByBuild is that count per Build ID, so a version scaling up from
+	// zero is visible.
+	WorkersByBuild map[string]int `json:"workersByBuild,omitempty"`
 }
 
 // UnversionedBuild is the bucket for pollers that reported no Build ID.

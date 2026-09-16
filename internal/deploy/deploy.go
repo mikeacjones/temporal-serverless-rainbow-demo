@@ -49,10 +49,11 @@ type Version struct {
 	TrafficPct float32   `json:"trafficPct"`
 	CreateTime time.Time `json:"createTime"`
 
-	// Pollers is how many workers are currently polling for this version.
+	// Workers is how many workers the server reports as Running for this
+	// version. Deliberately not a poller count — see metrics.Capacity.Workers.
 	// With serverless workers this is the number that matters: an idle
 	// version sits at zero until there is work for it.
-	Pollers int `json:"pollers"`
+	Workers int `json:"workers"`
 }
 
 // Routing is the deployment's live traffic split.

@@ -485,8 +485,8 @@ function rolloutControls(rollout) {
 
 function renderFleet(s) {
   const capacity = s.capacity || {};
-  $('pollers').textContent = int(capacity.pollers);
-  $('pollers').className = 'gauge-value' + (capacity.pollers ? ' gauge-value-live' : '');
+  $('workers').textContent = int(capacity.workers);
+  $('workers').className = 'gauge-value' + (capacity.workers ? ' gauge-value-live' : '');
   $('backlog').textContent = int(capacity.backlogDepth);
 
   // Zero wait is the good case and deserves to read as such.
@@ -496,13 +496,13 @@ function renderFleet(s) {
   renderSyncMatch(s.syncMatch || {});
 
   const history = s.history || {};
-  drawSpark($('spark-pollers'), history.pollers, 'var(--cyan)');
+  drawSpark($('spark-workers'), history.workers, 'var(--cyan)');
   drawSpark($('spark-backlog'), history.backlog, 'var(--v4)');
 
   // Name the peak over the window the graph actually shows, so the figure is
   // scoped rather than implied.
-  const peakWorkers = peakOf(history.pollers);
-  $('pollers-name').textContent = peakWorkers > (capacity.pollers || 0)
+  const peakWorkers = peakOf(history.workers);
+  $('workers-name').textContent = peakWorkers > (capacity.workers || 0)
     ? `workers running · peak ${int(peakWorkers)}`
     : 'workers running';
 
@@ -688,11 +688,11 @@ function updateStation(station, version, s, routing) {
 
   share.children[0].textContent = pct(version.trafficPct);
 
-  workers.className = 'station-workers' + (version.pollers ? ' station-workers-live' : '');
-  workers.children[0].textContent = int(version.pollers || 0);
-  workers.children[1].textContent = version.pollers ? 'workers running' : 'no workers running';
+  workers.className = 'station-workers' + (version.workers ? ' station-workers-live' : '');
+  workers.children[0].textContent = int(version.workers || 0);
+  workers.children[1].textContent = version.workers ? 'workers running' : 'no workers running';
 
-  drawSpark(sparkSvg, ((s.history || {}).pollersByVersion || {})[version.label], colorFor(version.label));
+  drawSpark(sparkSvg, ((s.history || {}).workersByVersion || {})[version.label], colorFor(version.label));
 
   // The pipeline is no longer listed step by step here — every order ticket
   // draws it as dots — but its length is what differs between versions, so it
