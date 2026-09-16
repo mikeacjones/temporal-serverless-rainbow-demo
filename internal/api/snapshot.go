@@ -14,18 +14,18 @@ import (
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/traffic"
 )
 
-// defaultLiveOrderSample is how many live orders the rail seats when
-// LIVE_ORDER_SAMPLE is not set.
+// defaultOrdersPerVersion is how many live orders each version's column
+// samples when ORDERS_PER_VERSION is not set.
 //
-// Two things bound this. Visibility returns the newest N, so too small an N at
-// a high order rate drops an order out of the window before it finishes, and
-// it appears to vanish halfway through its journey. Too large and the browser
-// is animating more tickets than anyone can read — the cost is not the query,
-// which is a single page either way.
+// Per version, not in total, and that distinction is the whole point. A single
+// shared window is ordered newest-first, so one version's burst evicts
+// another's orders outright: 250 orders dumped on v3 straight after 250 on v2
+// left the sample holding 104 v3 rows and no v2 rows at all, with 500 orders
+// running. The v2 column emptied while its work was still in flight.
 //
-// The rail seats what it is given and no more, so this is a ceiling rather
-// than a target: at 150 orders a minute it settles around twenty.
-const defaultLiveOrderSample = 150
+// Comfortably above the column's display cap, so orders leaving the window are
+// ones the column was never showing.
+const defaultOrdersPerVersion = 40
 
 // historyLength is how many samples the sparklines keep — at a one-second
 // poll, about two minutes of history.
@@ -272,7 +272,7 @@ func (s *Server) build(ctx context.Context) *Snapshot {
 	})
 
 	run(func() {
-		live, err := s.reader.RecentOrders(ctx, s.orderSample)
+		live, err := s.reader.RecentOrders(ctx, orders.AllVersionLabels(), s.orderSample)
 		if err != nil {
 			s.logger.Debug("recent orders failed", "err", err)
 			if previous != nil {

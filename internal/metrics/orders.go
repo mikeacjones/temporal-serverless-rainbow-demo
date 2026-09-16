@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -36,30 +37,82 @@ type LiveOrder struct {
 	Done bool `json:"done"`
 }
 
-// RecentOrders returns a sample of the most recently started orders.
+// RecentOrders samples each version's live orders separately.
 //
-// A sample, not the full set: at demo volumes there can be tens of thousands of
-// open orders, and the point of the live strip is to show the texture of
-// traffic, not to enumerate it.
-func (r *Reader) RecentOrders(ctx context.Context, limit int) ([]LiveOrder, error) {
-	resp, err := r.c.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-		Namespace: r.namespace,
-		PageSize:  int32(limit),
-		// No ORDER BY: the visibility store rejects it outright ("operation is
-		// not supported") and it is unnecessary — open executions already come
-		// back newest-first.
-		Query: fmt.Sprintf(`WorkflowType = %q`, orders.WorkflowTypeName),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list recent orders: %w", err)
+// One shared sample does not work once the orders are shown per version. The
+// visibility list returns the newest executions, so dumping 250 orders onto v3
+// straight after 250 onto v2 pushed every v2 order out of a 150-row window —
+// 104 v3 rows and not one v2 row, with 500 orders running. The v2 column
+// emptied on screen while its orders were still working.
+//
+// A window per version cannot be crowded out by another version's burst. It
+// costs one list call per version instead of one in total, but they run
+// together and each asks for far fewer rows.
+//
+// Only Running executions are sampled. Completed orders would otherwise fill
+// most of every window — at any real order rate the great majority of recent
+// orders have already finished — and the dashboard shows work in flight.
+func (r *Reader) RecentOrders(ctx context.Context, versions []string, perVersion int) ([]LiveOrder, error) {
+	if perVersion <= 0 || len(versions) == 0 {
+		return nil, nil
 	}
 
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		out      []LiveOrder
+		firstErr error
+	)
+
 	now := time.Now()
-	out := make([]LiveOrder, 0, len(resp.GetExecutions()))
-	for _, e := range resp.GetExecutions() {
-		out = append(out, liveOrder(e, now))
+	for _, version := range versions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			resp, err := r.c.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
+				Namespace: r.namespace,
+				PageSize:  int32(perVersion),
+				// No ORDER BY: the visibility store rejects it outright
+				// ("operation is not supported"), and it is unnecessary —
+				// executions already come back newest-first.
+				Query: recentOrdersQuery(version),
+			})
+			if err != nil {
+				mu.Lock()
+				defer mu.Unlock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("list %s orders: %w", version, err)
+				}
+				return
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			for _, e := range resp.GetExecutions() {
+				out = append(out, liveOrder(e, now))
+			}
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return out, nil
+}
+
+// recentOrdersQuery scopes a sample to one version's running orders.
+//
+// Both halves are load-bearing. Without the version filter the windows are
+// shared, and one version's burst evicts another's orders from it. Without the
+// Running filter the window fills with completed orders — at any real order
+// rate most recent orders have already finished — and the column shows work
+// that is already done.
+func recentOrdersQuery(version string) string {
+	return fmt.Sprintf(
+		`WorkflowType = %q AND ExecutionStatus = "Running" AND OrderVersion = %q`,
+		orders.WorkflowTypeName, version)
 }
 
 // liveOrder maps one visibility record to what the dashboard shows.

@@ -72,7 +72,7 @@ func run(logger *slog.Logger) error {
 		// Lambdas, and each invocation bills for its whole window.
 		TrafficMaxRun: config.EnvDuration("TRAFFIC_MAX_RUN", traffic.DefaultMaxRun),
 		// How many live orders the rail seats at once.
-		OrderSample: config.EnvInt("LIVE_ORDER_SAMPLE", 0),
+		OrderSample: config.EnvInt("ORDERS_PER_VERSION", 0),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

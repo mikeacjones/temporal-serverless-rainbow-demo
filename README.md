@@ -305,7 +305,7 @@ to the backend Service in the same namespace.
 | `TEMPORAL_METRICS_API_KEY` | — | backend; required for Temporal Cloud's metrics endpoint, from a service account with the **Metrics Read-Only** role. Unused self-hosted. |
 | `TRAFFIC_CONCURRENCY` | `50` | control plane; how sharp a spike can be |
 | `TRAFFIC_MAX_RUN` | `20m` | backend; how long traffic flows untouched before stopping itself |
-| `LIVE_ORDER_SAMPLE` | `150` | backend; how many live orders the rail seats at once |
+| `ORDERS_PER_VERSION` | `40` | backend; live orders sampled per version for the order columns |
 | `LOG_FORMAT` | `json` | all; `text` for humans |
 
 ### Speed profiles

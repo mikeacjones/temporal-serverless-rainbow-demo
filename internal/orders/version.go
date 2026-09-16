@@ -21,6 +21,16 @@ const (
 // AllVersions lists every version this build knows how to serve, in order.
 var AllVersions = []Version{V1, V2, V3, V4, V5}
 
+// AllVersionLabels is AllVersions as plain strings, for callers building
+// visibility queries.
+func AllVersionLabels() []string {
+	out := make([]string, 0, len(AllVersions))
+	for _, v := range AllVersions {
+		out = append(out, string(v))
+	}
+	return out
+}
+
 // Step is one stage of an order's journey. Steps are the unit of work: each one
 // becomes a single Activity execution.
 type Step string

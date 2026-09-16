@@ -153,7 +153,7 @@ function renderReadouts(s) {
   $('throughput').textContent = int(s.completedPerMin);
   $('inflight').textContent = int(s.totals.running);
   $('backlog-top').textContent = int(s.capacity.backlogDepth);
-  $('order-time').textContent = medianOrderTime(s.orders);
+  $('order-time').textContent = medianOrderTime();
   renderAutoStop(traffic);
 
   const stuck = s.totals.degraded || 0;
@@ -173,20 +173,14 @@ function renderReadouts(s) {
   }
 }
 
-// medianOrderTime reads the middle completed order out of the sampled strip.
+// medianOrderTime reads the middle of the orders that have recently departed.
 //
-// A median rather than a p99: the sample is the most recent few dozen orders,
-// which is nowhere near enough to place a tail percentile honestly.
-//
-// This one really does want Completed rather than order.done: a terminated or
-// failed order stopped partway, so its elapsed time is not how long an order
-// takes.
-function medianOrderTime(orders) {
-  const done = (orders || [])
-    .filter((o) => o.status === 'Completed')
-    .map((o) => o.elapsedSec)
-    .sort((a, b) => a - b);
-  return done.length ? age(done[Math.floor(done.length / 2)]) : '—';
+// A median rather than a p99: this is a few dozen orders, nowhere near enough
+// to place a tail percentile honestly.
+function medianOrderTime() {
+  if (!served.length) return '—';
+  const sorted = [...served].sort((a, b) => a - b);
+  return age(sorted[Math.floor(sorted.length / 2)]);
 }
 
 // renderAutoStop says when traffic will stop itself.
@@ -830,14 +824,8 @@ function renderColumns(s) {
 
   const shown = drawColumns(s, all, filter);
 
-  // Orders with no version yet are counted rather than seated. The Workflow
-  // publishes its version on its first Workflow Task, so an order that has
-  // been started but not yet picked up belongs to no column — and under a
-  // backlog that number is the interesting one.
-  const waiting = all.filter((o) => !o.done && !o.version).length;
   $('tickets-count').textContent = all.length
-    ? `${shown} shown · ${int(s.totals.running)} in flight` +
-      (waiting ? ` · ${waiting} waiting for a worker` : '')
+    ? `${shown} shown · ${int(s.totals.running)} in flight`
     : '';
 
   const stuck = s.totals.degraded || 0;
@@ -878,6 +866,12 @@ const departQueued = 4;
 // already is.
 const columnMax = 14;
 
+// The stylesheet reserves cap * card height for every column, so a column is
+// the same size whether it is full or idle and the page never grows and
+// shrinks under the cursor. Publishing the cap from here keeps the reserved
+// height and the number of cards from drifting apart.
+document.documentElement.style.setProperty('--column-cap', String(columnMax));
+
 const seatedNodes = new Map(); // order ID -> its ticket element
 const columnNodes = new Map(); // version label -> its column parts
 
@@ -895,6 +889,23 @@ const departing = new Map(); // version label -> order ID
 // finished remembers which orders have completed, so a departure can be
 // decided between snapshots.
 const finished = new Set();
+
+// held keeps the last state seen for every seated order.
+//
+// The sample only contains *running* orders, so an order that completes simply
+// stops being reported. Holding its last state is what lets it grey out and
+// leave from the top of its column instead of being yanked out of the middle
+// of the stack the instant the backend stops mentioning it.
+const held = new Map(); // order ID -> its last reported state
+
+// served collects the final age of departed orders, newest last.
+//
+// The order sample holds no completed orders to take a median from any more,
+// so the duration is measured as each order leaves. It is a fraction of a
+// second short of the true figure — the last sighting is up to one poll old —
+// which is well inside what a median of a few dozen orders can claim.
+const served = [];
+const servedMax = 60;
 
 // retired holds orders that have finished and collapsed away.
 //
@@ -918,30 +929,43 @@ function drawColumns(s, orders, filter) {
 
   if (!drawnOnce) {
     for (const order of orders) {
-      if (order.done) retired.add(order.orderId);
+      if (order.done) {
+        held.set(order.orderId, order);
+        retired.add(order.orderId);
+      }
     }
   }
 
-  // Drop tickets whose order has left the window or finished collapsing.
-  for (const [id, node] of seatedNodes) {
-    if (!byId.has(id) || retired.has(id)) {
-      node.remove();
-      seatedNodes.delete(id);
-    }
+  // Remember what is running, and treat anything that stops being reported as
+  // finished rather than gone: the sample is running orders only, so an order
+  // leaving it has completed and has a departure to play out.
+  for (const order of orders) {
+    if (order.version) held.set(order.orderId, order);
   }
+  for (const [id, order] of held) {
+    if (!byId.has(id) || order.done) finished.add(id);
+  }
+
+  // Only a retired order — one that has finished its departure — is dropped.
   for (const id of retired) {
-    if (!byId.has(id)) {
-      retired.delete(id);
-      finished.delete(id);
+    const node = seatedNodes.get(id);
+    if (node) node.remove();
+    seatedNodes.delete(id);
+    const order = held.get(id);
+    if (order) {
+      served.push(order.elapsedSec);
+      if (served.length > servedMax) served.shift();
     }
+    held.delete(id);
+    finished.delete(id);
+    retired.delete(id);
   }
 
   // Group by version, oldest first. Order IDs are zero-padded and monotonic
   // with start time, so sorting on them is stable — unlike age, which is whole
   // seconds and leaves dozens of orders tied and reshuffling every frame.
   const byVersion = new Map(versions.map((v) => [v, []]));
-  for (const order of orders) {
-    if (!order.version || retired.has(order.orderId)) continue;
+  for (const order of held.values()) {
     const bucket = byVersion.get(order.version);
     if (bucket) bucket.push(order);
   }
@@ -969,9 +993,7 @@ function drawColumns(s, orders, filter) {
         node = otick(order, s.pipelines || {});
         seatedNodes.set(order.orderId, node);
       }
-      updateOtick(node, order, s.pipelines || {});
-
-      if (order.done) finished.add(order.orderId);
+      updateOtick(node, order, s.pipelines || {}, finished.has(order.orderId));
 
       children.push(node);
       showing += 1;
@@ -1095,8 +1117,7 @@ function otick(order, pipelines) {
 // The step dots are rebuilt only when the order has actually moved: redrawing
 // them every frame would restart the pulse on the live dot, which is the one
 // thing showing the order is alive.
-function updateOtick(node, order, pipelines) {
-  const done = order.done;
+function updateOtick(node, order, pipelines, done) {
 
   // A card already on its way out is left alone: rewriting its classes would
   // drop otick-departing mid-transition and the card would snap back.

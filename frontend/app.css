@@ -51,6 +51,16 @@
   --gutter: 1rem;
   --margin: 1.5rem;
 
+  /* Order-card geometry. The column reserves cap * (height + gap) so its size
+   * never depends on how much work is in it — a column that fills and empties
+   * must not move the page under the cursor. --column-cap is written from
+   * script at start-up, so the cap and the reserved height cannot drift
+   * apart. */
+  --otick-h: 42px;
+  --otick-gap: 5px;
+  --column-cap: 14;
+  --stack-h: calc(var(--column-cap) * (var(--otick-h) + var(--otick-gap)));
+
   --display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
   --body: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
@@ -490,7 +500,9 @@ select { width: 100%; }
   align-items: start;
 }
 
-.order-col { display: flex; flex-direction: column; min-width: 0; }
+/* Positioned, so the idle label can sit over the reserved space instead of
+ * adding to it. */
+.order-col { position: relative; display: flex; flex-direction: column; min-width: 0; }
 
 .order-col-head {
   display: flex; align-items: baseline; gap: 8px;
@@ -506,15 +518,19 @@ select { width: 100%; }
 /* The stack itself. Margin rather than gap, because gap cannot be animated
  * and the collapse of a leaving ticket's own box is what pulls the orders
  * below it upwards. */
-/* Clipped, so a card leaving through the top of the stack is cut off by the
- * column edge rather than floating over the version card above it. */
-.order-stack { display: flex; flex-direction: column; min-height: 4px; overflow: hidden; }
+/* Fixed height, and clipped: a card leaving through the top is cut off by the
+ * column edge rather than floating over the version card above, and the column
+ * holds its size whether it is full or idle. */
+.order-stack {
+  display: flex; flex-direction: column;
+  height: var(--stack-h);
+  overflow: hidden;
+}
 
 .otick {
-  --otick-h: 42px;
   box-sizing: border-box;
   max-height: var(--otick-h);
-  margin-bottom: 5px;
+  margin-bottom: var(--otick-gap);
   padding: 5px 8px;
   overflow: hidden;
   background: color-mix(in srgb, var(--surface-low) 80%, transparent);
@@ -579,13 +595,21 @@ select { width: 100%; }
 .otick-steps { display: flex; align-items: center; gap: 2px; flex: none; }
 .otick-stuck .otick-step { color: var(--trouble); }
 
+/* Always the same height, empty or not, for the same reason as the stack. */
 .order-col-more {
-  font-size: 10px; color: var(--ink-faint);
-  padding: 3px 2px 0; letter-spacing: 0.04em;
+  height: 16px;
+  font: 500 10px/16px var(--mono); color: var(--ink-faint);
+  padding: 0 2px; letter-spacing: 0.04em;
 }
+
+/* Over the reserved space rather than in the flow, so an idle column is the
+ * same height as a full one. */
 .order-col-empty {
-  font-size: 10px; color: var(--ink-faint);
-  padding: 6px 2px; letter-spacing: 0.04em;
+  position: absolute; left: 0; right: 0;
+  top: calc(50% - 8px);
+  text-align: center; pointer-events: none;
+  font: 500 10px/16px var(--mono); color: var(--ink-faint);
+  letter-spacing: 0.1em; text-transform: uppercase;
 }
 
 /* Removal is driven by a timer, so with motion reduced the ticket dims for
