@@ -290,22 +290,38 @@ func (s *Server) build(ctx context.Context) *Snapshot {
 
 	run(func() { snapshot.SyncMatch = s.syncMatch.Read(ctx) })
 
-	run(func() {
-		if state := s.traffic.state(ctx); state != nil {
-			snapshot.Traffic = state
-		} else if previous != nil {
+	// The control plane's state is the only thing here that needs a Worker on
+	// the control task queue: reading it is a Query, and a Query has to be
+	// answered by a running Worker. Everything else on this snapshot is
+	// visibility and task-queue metadata, which the server answers by itself.
+	//
+	// So with nobody watching, these two are skipped. That is what lets the
+	// control Worker scale to zero — otherwise the dashboard's own poll keeps
+	// it alive forever, whether or not a browser is open. The last known
+	// values are carried forward so a reconnecting page is not briefly blank.
+	if !s.watched() {
+		if previous != nil {
 			snapshot.Traffic = previous.Traffic
-		}
-	})
-
-	run(func() {
-		if state := s.rollouts.state(ctx); state != nil {
-			snapshot.Rollout = state
-		} else if previous != nil {
-			// A Query that failed does not mean the rollout went away.
 			snapshot.Rollout = previous.Rollout
 		}
-	})
+	} else {
+		run(func() {
+			if state := s.traffic.state(ctx); state != nil {
+				snapshot.Traffic = state
+			} else if previous != nil {
+				snapshot.Traffic = previous.Traffic
+			}
+		})
+
+		run(func() {
+			if state := s.rollouts.state(ctx); state != nil {
+				snapshot.Rollout = state
+			} else if previous != nil {
+				// A Query that failed does not mean the rollout went away.
+				snapshot.Rollout = previous.Rollout
+			}
+		})
+	}
 
 	wg.Wait()
 

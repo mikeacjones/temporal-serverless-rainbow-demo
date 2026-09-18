@@ -88,3 +88,32 @@ func TestHistoryWindowOutlivesASpike(t *testing.T) {
 		t.Errorf("history covers only %s; a spike's tail outlives that", window)
 	}
 }
+
+// Reading the control plane's state is a Query, and a Query needs a running
+// Worker — so the dashboard's own poll is what would keep the control Worker
+// alive forever, whether or not anyone had the page open. This is the decision
+// that lets it idle.
+func TestControlPlaneIsOnlyReadWhenSomebodyIsLooking(t *testing.T) {
+	now := time.Date(2026, 9, 18, 14, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name     string
+		viewers  int
+		lastSeen time.Time
+		want     bool
+	}{
+		{"a page is open", 1, time.Time{}, true},
+		{"several pages open", 4, time.Time{}, true},
+		{"nobody, and nobody has ever asked", 0, time.Time{}, false},
+		// A caller that does not stream still counts, briefly, so a script
+		// polling the API does not read frozen numbers without knowing.
+		{"a request moments ago", 0, now.Add(-2 * time.Second), true},
+		{"a request just inside the window", 0, now.Add(-interestWindow + time.Second), true},
+		{"a request just outside it", 0, now.Add(-interestWindow - time.Second), false},
+		{"a request long ago", 0, now.Add(-time.Hour), false},
+	} {
+		if got := looking(tc.viewers, tc.lastSeen, now); got != tc.want {
+			t.Errorf("%s: looking = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

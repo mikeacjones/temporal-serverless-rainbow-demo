@@ -78,6 +78,12 @@ type Server struct {
 	sinceMu sync.Mutex
 	since   time.Time
 
+	// seenMu guards the last time a client asked for state, which is how a
+	// non-streaming caller registers interest.
+	seenMu     sync.Mutex
+	lastSeen   time.Time
+	wasWatched bool
+
 	allowedOrigin string
 
 	// snapshot is replaced wholesale on each poll, so readers never see a
@@ -199,6 +205,8 @@ func (s *Server) latest() *Snapshot {
 // handleState serves the current snapshot, for clients that would rather poll
 // than hold an SSE stream open.
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	s.noteInterest()
+
 	snapshot := s.latest()
 	if snapshot == nil {
 		snapshot = s.build(r.Context())
@@ -295,4 +303,61 @@ func (s *Server) resetCounters(all bool) time.Time {
 	s.healthMu.Unlock()
 
 	return from
+}
+
+// interestWindow is how long a one-off request for state counts as somebody
+// looking.
+//
+// Long enough that a script polling every few seconds keeps the control plane
+// awake, short enough that it goes quiet soon after the last caller leaves.
+const interestWindow = 15 * time.Second
+
+// noteInterest records that a client asked for state.
+func (s *Server) noteInterest() {
+	s.seenMu.Lock()
+	s.lastSeen = time.Now()
+	s.seenMu.Unlock()
+}
+
+// watched reports whether anybody is looking at the dashboard.
+func (s *Server) watched() bool {
+	s.seenMu.Lock()
+	lastSeen := s.lastSeen
+	s.seenMu.Unlock()
+
+	now := looking(s.hub.count(), lastSeen, time.Now())
+
+	// Logged on the change only, because it explains a real behaviour switch:
+	// while unwatched the control plane's numbers stop refreshing, and
+	// somebody reading the logs should be able to see why.
+	s.seenMu.Lock()
+	if now != s.wasWatched {
+		s.wasWatched = now
+		s.seenMu.Unlock()
+		if now {
+			s.logger.Info("someone is watching; resuming control-plane reads")
+		} else {
+			s.logger.Info("nobody watching; pausing control-plane reads so its worker can idle")
+		}
+		return now
+	}
+	s.seenMu.Unlock()
+
+	return now
+}
+
+// looking decides whether the dashboard has an audience.
+//
+// A streaming client is the real signal — a browser holds its SSE connection
+// for as long as the page is open. A plain request for state counts too, for a
+// while, so that a script or a health check polling the API does not silently
+// read frozen numbers just because it does not stream.
+func looking(viewers int, lastSeen, now time.Time) bool {
+	if viewers > 0 {
+		return true
+	}
+	if lastSeen.IsZero() {
+		return false
+	}
+	return now.Sub(lastSeen) < interestWindow
 }
