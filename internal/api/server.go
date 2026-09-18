@@ -73,6 +73,11 @@ type Server struct {
 	lastReconcile time.Time
 	lastHistory   time.Time
 
+	// sinceMu guards the counter baseline, which an HTTP handler sets while
+	// the poll goroutine reads it.
+	sinceMu sync.Mutex
+	since   time.Time
+
 	allowedOrigin string
 
 	// snapshot is replaced wholesale on each poll, so readers never see a
@@ -153,6 +158,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/traffic/split", s.handleTrafficSplit)
 	mux.HandleFunc("POST /api/traffic/chaos", s.handleTrafficChaos)
 	mux.HandleFunc("POST /api/traffic/stop", s.handleTrafficStop)
+
+	// Counters.
+	mux.HandleFunc("POST /api/metrics/reset", s.handleMetricsReset)
 
 	// Automated rollouts.
 	mux.HandleFunc("POST /api/rollout", s.handleRolloutStart)
@@ -251,4 +259,40 @@ func decode(r *http.Request, target any) error {
 		return err
 	}
 	return nil
+}
+
+// countFrom is the moment the dashboard's counters start from.
+//
+// Zero means all time, which is the default: an operator opening the dashboard
+// should see everything that has happened, not an empty board.
+func (s *Server) countFrom() time.Time {
+	s.sinceMu.Lock()
+	defer s.sinceMu.Unlock()
+	return s.since
+}
+
+// resetCounters narrows the counters to orders started from now on, or widens
+// them back to all time.
+//
+// Nothing is deleted. The orders behind the old numbers are still there and
+// still queryable; only the question the dashboard asks changes. That matters
+// for a demo given twice in a morning — the second one deserves clean numbers
+// without destroying the evidence from the first.
+func (s *Server) resetCounters(all bool) time.Time {
+	s.sinceMu.Lock()
+	if all {
+		s.since = time.Time{}
+	} else {
+		s.since = time.Now()
+	}
+	from := s.since
+	s.sinceMu.Unlock()
+
+	// Health is cached for ten seconds, so without this the version cards
+	// would keep showing pre-reset numbers for long enough to look broken.
+	s.healthMu.Lock()
+	s.healthCache, s.healthAt = nil, time.Time{}
+	s.healthMu.Unlock()
+
+	return from
 }

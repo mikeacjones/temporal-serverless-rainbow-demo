@@ -95,15 +95,21 @@ arns="arn:aws:lambda:$REGION:$account:function:$NAME:*"
 for v in ${VERSIONS:-v1 v2 v3 v4 v5}; do
   arns+=",arn:aws:lambda:$REGION:$account:function:${PREFIX:-rainbow-orders}-$v:*"
 done
-aws cloudformation update-stack --stack-name "$INVOKE_ROLE_STACK" \
-  --template-body "file://deploy/aws/cfn/invoke-role.yaml" \
-  --capabilities CAPABILITY_NAMED_IAM --region "$REGION" \
-  --parameters \
-    "ParameterKey=RoleName,UsePreviousValue=true" \
-    "ParameterKey=AssumeRoleExternalId,UsePreviousValue=true" \
-    "ParameterKey=LambdaFunctionARNs,ParameterValue=\"$arns\"" >/dev/null 2>&1 \
-  && aws cloudformation wait stack-update-complete --stack-name "$INVOKE_ROLE_STACK" --region "$REGION" \
-  || echo "    (policy already covers it)"
+if out=$(aws cloudformation update-stack --stack-name "$INVOKE_ROLE_STACK" \
+    --template-body "file://deploy/aws/cfn/invoke-role.yaml" \
+    --capabilities CAPABILITY_NAMED_IAM --region "$REGION" \
+    --parameters \
+      "ParameterKey=RoleName,UsePreviousValue=true" \
+      "ParameterKey=AssumeRoleExternalId,UsePreviousValue=true" \
+      "ParameterKey=LambdaFunctionARNs,ParameterValue=\"$arns\"" 2>&1); then
+  aws cloudformation wait stack-update-complete --stack-name "$INVOKE_ROLE_STACK" --region "$REGION"
+  echo "    policy updated"
+elif grep -qi "No updates are to be performed" <<<"$out"; then
+  echo "    policy already covers it"
+else
+  echo "    $out" >&2
+  exit 1
+fi
 
 # Register the control plane as its own Worker Deployment Version.
 invoke_role=$(aws iam get-role --role-name "$INVOKE_ROLE_NAME" --query 'Role.Arn' --output text)
@@ -117,6 +123,21 @@ for s in json.load(sys.stdin).get('Statement', []):
         break")
 
 t=(--address "$TEMPORAL_ADDRESS" --namespace "$TEMPORAL_NAMESPACE" --api-key "$TEMPORAL_API_KEY" --tls)
+
+# A Worker Deployment is normally created lazily, the first time a Worker
+# polls with a version. A serverless Worker cannot do that: Temporal will not
+# invoke it until a version is registered, and a version cannot be registered
+# without the deployment. So it has to be pre-defined. Already existing is the
+# normal case on redeploys and is not an error.
+echo "  ensuring the $CONTROL_DEPLOYMENT deployment exists"
+if out=$(temporal worker deployment create "${t[@]}" --name "$CONTROL_DEPLOYMENT" 2>&1); then
+  echo "    created"
+elif grep -qi "already exists" <<<"$out"; then
+  echo "    already there"
+else
+  echo "    $out" >&2
+  exit 1
+fi
 
 echo "  registering $CONTROL_DEPLOYMENT:$BUILD_ID"
 if temporal worker deployment describe-version "${t[@]}" \

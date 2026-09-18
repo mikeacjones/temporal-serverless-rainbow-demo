@@ -230,6 +230,43 @@ func parseStep(version orders.Version, step string) (orders.Step, error) {
 	return "", fmt.Errorf("version %s has no step %q", version, step)
 }
 
+// --- Counters --------------------------------------------------------------
+
+type resetRequest struct {
+	// All widens the counters back to every order ever started, undoing a
+	// previous reset.
+	All bool `json:"all"`
+}
+
+type resetResponse struct {
+	CountingFrom time.Time `json:"countingFrom"`
+	Message      string    `json:"message"`
+}
+
+// handleMetricsReset gives the dashboard a clean set of numbers.
+//
+// Deliberately not destructive. Orders already started are untouched and stay
+// queryable; the counters simply stop counting them. Deleting or terminating
+// them to make a total read zero would throw away the evidence of whatever was
+// just demonstrated, and would take minutes rather than being instant.
+func (s *Server) handleMetricsReset(w http.ResponseWriter, r *http.Request) {
+	var req resetRequest
+	if err := decode(r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	from := s.resetCounters(req.All)
+
+	message := "Counters reset — showing orders from now on"
+	if req.All {
+		message = "Counters now cover every order"
+	}
+	s.logger.Info("counters reset", "countingFrom", from, "all", req.All)
+
+	writeJSON(w, http.StatusOK, resetResponse{CountingFrom: from, Message: message})
+}
+
 // --- Automated rollouts ----------------------------------------------------
 
 // startRolloutRequest is the dashboard's view of a rollout plan. Durations are

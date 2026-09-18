@@ -75,6 +75,11 @@ type Snapshot struct {
 	Pipelines map[string][]orders.Step `json:"pipelines"`
 
 	Viewers int `json:"viewers"`
+
+	// CountingFrom is when the dashboard's counters were last reset, or the
+	// zero time when they cover everything. Sent so the UI can say which it
+	// is rather than leaving an operator guessing why a total looks small.
+	CountingFrom time.Time `json:"countingFrom"`
 }
 
 // History holds the series behind the sparklines.
@@ -228,7 +233,7 @@ func (s *Server) build(ctx context.Context) *Snapshot {
 	})
 
 	run(func() {
-		totals, err := s.reader.Totals(ctx)
+		totals, err := s.reader.Totals(ctx, s.countFrom())
 		if err != nil {
 			s.logger.Debug("order totals failed", "err", err)
 			if previous != nil {
@@ -319,6 +324,7 @@ func (s *Server) build(ctx context.Context) *Snapshot {
 		s.history.pushVersions(snapshot.Deployment.Versions)
 	}
 	snapshot.History = *s.history
+	snapshot.CountingFrom = s.countFrom()
 
 	return snapshot
 }
@@ -331,6 +337,7 @@ func (s *Server) versionHealth(
 	previous *Snapshot,
 ) map[string]metrics.Health {
 	out := make(map[string]metrics.Health, len(versions))
+	since := s.countFrom()
 
 	s.healthMu.Lock()
 	fresh := time.Since(s.healthAt) < healthTTL
@@ -353,7 +360,7 @@ func (s *Server) versionHealth(
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			health, err := s.reader.VersionHealth(ctx, v.BuildID, time.Time{})
+			health, err := s.reader.VersionHealth(ctx, v.BuildID, since)
 			if err != nil {
 				s.logger.Debug("version health failed", "buildId", v.BuildID, "err", err)
 				if previous != nil {

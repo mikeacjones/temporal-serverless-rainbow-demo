@@ -149,3 +149,29 @@ func TestAnEmptySampleIsAnEmptyList(t *testing.T) {
 		}
 	}
 }
+
+// Resetting the counters must narrow the query, not delete anything.
+//
+// The point of the reset is that a demo given twice in a morning can have
+// clean numbers the second time without destroying the evidence from the
+// first, so the scope is the only thing that may change.
+func TestCounterResetNarrowsTheQueryByStartTime(t *testing.T) {
+	since := time.Date(2026, 9, 18, 13, 0, 0, 0, time.UTC)
+
+	all := totalsQuery(time.Time{})
+	from := totalsQuery(since)
+
+	if strings.Contains(all, "StartTime") {
+		t.Errorf("the default scope is time-limited: %s", all)
+	}
+	if !strings.Contains(from, `StartTime > "2026-09-18T13:00:00Z"`) {
+		t.Errorf("reset scope does not filter on the baseline: %s", from)
+	}
+	// Both must still be scoped to orders, or a reset would start counting
+	// gate probes and anything else in the namespace.
+	for name, q := range map[string]string{"all-time": all, "since reset": from} {
+		if !strings.Contains(q, orders.WorkflowTypeName) {
+			t.Errorf("%s scope is not limited to orders: %s", name, q)
+		}
+	}
+}

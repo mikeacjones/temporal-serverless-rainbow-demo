@@ -162,12 +162,19 @@ type Totals struct {
 //
 // The status breakdown is a single grouped count rather than one query per
 // status, because this runs on the dashboard's poll loop.
-func (r *Reader) Totals(ctx context.Context) (Totals, error) {
+//
+// A non-zero since counts only orders started after that moment, which is how
+// the dashboard's counters are reset: nothing is deleted, the question is
+// simply narrowed. A demo that has been running all morning can be given a
+// clean set of numbers without throwing away the orders behind them.
+func (r *Reader) Totals(ctx context.Context, since time.Time) (Totals, error) {
 	var t Totals
+
+	scope := totalsQuery(since)
 
 	resp, err := r.c.CountWorkflow(ctx, &workflowservice.CountWorkflowExecutionsRequest{
 		Namespace: r.namespace,
-		Query:     fmt.Sprintf(`WorkflowType = %q GROUP BY ExecutionStatus`, orders.WorkflowTypeName),
+		Query:     scope + " GROUP BY ExecutionStatus",
 	})
 	if err != nil {
 		return Totals{}, fmt.Errorf("count orders by status: %w", err)
@@ -183,15 +190,27 @@ func (r *Reader) Totals(ctx context.Context) (Totals, error) {
 		}
 	}
 
-	degraded, err := r.count(ctx, fmt.Sprintf(
-		`WorkflowType = %q AND ExecutionStatus = "Running" AND OrderHealth = %q`,
-		orders.WorkflowTypeName, orders.HealthDegraded))
+	degraded, err := r.count(ctx, fmt.Sprintf(`%s AND ExecutionStatus = "Running" AND OrderHealth = %q`,
+		scope, orders.HealthDegraded))
 	if err != nil {
 		return Totals{}, err
 	}
 	t.Degraded = degraded
 
 	return t, nil
+}
+
+// totalsQuery scopes the order counters, optionally to a reset baseline.
+//
+// Pure and separate because the reset is only ever a change of scope: the
+// orders behind the old numbers stay exactly where they are, and this is the
+// one place that decides which of them are counted.
+func totalsQuery(since time.Time) string {
+	scope := fmt.Sprintf(`WorkflowType = %q`, orders.WorkflowTypeName)
+	if !since.IsZero() {
+		scope += fmt.Sprintf(` AND StartTime > %q`, since.UTC().Format(time.RFC3339))
+	}
+	return scope
 }
 
 // count runs one visibility count query.

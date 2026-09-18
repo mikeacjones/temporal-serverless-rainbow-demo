@@ -159,6 +159,10 @@ body {
 .readout-trouble .readout-value { color: var(--trouble); }
 .readout-good .readout-value { color: var(--cyan); }
 
+.counters { display: flex; align-items: center; gap: 8px; }
+/* Only shown once a reset is in force, so the strip stays quiet by default. */
+#counters-since:empty { display: none; }
+
 .link-status { display: flex; align-items: center; gap: 8px; }
 .link-dot {
   width: 7px; height: 7px; border-radius: 50%;

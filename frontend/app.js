@@ -131,6 +131,7 @@ function render(next) {
 
   for (const [name, draw] of [
     ['readouts', renderReadouts],
+    ['counters', renderCounters],
     ['routing', renderSpectrum],
     ['legend', renderLegend],
     ['deployment', renderRollout],
@@ -181,6 +182,20 @@ function medianOrderTime() {
   if (!served.length) return '—';
   const sorted = [...served].sort((a, b) => a - b);
   return age(sorted[Math.floor(sorted.length / 2)]);
+}
+
+// renderCounters says whether the totals cover everything or only since a
+// reset. Worth saying: a total that looks small for no visible reason is the
+// kind of thing that derails a demo mid-sentence.
+function renderCounters(s) {
+  const from = Date.parse(s.countingFrom || '');
+  const reset = !Number.isNaN(from) && from > 0;
+
+  $('counters-since').textContent = reset
+    ? 'counting since ' + new Date(from).toLocaleTimeString()
+    : '';
+  $('counters-reset').textContent = reset ? 'Count everything' : 'Reset counters';
+  $('counters-reset').dataset.all = reset ? '1' : '';
 }
 
 // renderAutoStop says when traffic will stop itself.
@@ -1306,3 +1321,8 @@ fetch(url('/api/state'))
   .then(render)
   .catch(() => link('lost', 'backend unreachable'))
   .finally(connect);
+
+$('counters-reset').addEventListener('click', () => {
+  const all = Boolean($('counters-reset').dataset.all);
+  act('/api/metrics/reset', { all }, (r) => r.message);
+});
