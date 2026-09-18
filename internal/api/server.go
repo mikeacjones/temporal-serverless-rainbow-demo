@@ -80,8 +80,11 @@ type Server struct {
 
 	// seenMu guards the last time a client asked for state, which is how a
 	// non-streaming caller registers interest.
-	seenMu     sync.Mutex
-	lastSeen   time.Time
+	seenMu   sync.Mutex
+	lastSeen time.Time
+	// wasWatched starts true so that starting up with nobody watching logs
+	// the pause. Left false, the zero value matches the first reading and the
+	// most interesting state — nothing is being read — would be silent.
 	wasWatched bool
 
 	allowedOrigin string
@@ -125,6 +128,7 @@ func New(opts Options) *Server {
 		hub:           newHub(),
 		traffic:       &trafficController{c: opts.Client, logger: opts.Logger, maxRun: opts.TrafficMaxRun},
 		rollouts:      &rolloutController{c: opts.Client, taskQueue: opts.ControlQueue, logger: opts.Logger},
+		wasWatched:    true,
 		bursts:        traffic.NewBurst(opts.Client, opts.ControlQueue, opts.Logger),
 		allowedOrigin: opts.AllowedOrigin,
 		orderSample:   opts.OrderSample,
