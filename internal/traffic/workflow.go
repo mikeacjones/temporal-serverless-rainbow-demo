@@ -65,7 +65,6 @@ func Director(ctx workflow.Context, in Input) error {
 	// burning a timer to go looking.
 	ctrl := &control{
 		maxRun:  maxRun,
-		spikes:  workflow.NewBufferedChannel(ctx, 16),
 		changes: workflow.NewBufferedChannel(ctx, 16),
 	}
 
@@ -106,10 +105,12 @@ func Director(ctx workflow.Context, in Input) error {
 
 		// Nothing to do. Block until an operator asks for something: no timer,
 		// no history, no actions.
+		//
+		// A burst no longer wakes this. Bursts are Standalone Activities
+		// started from the client, so an idle generator stays idle through one
+		// — which is the point: a burst is not a change to the steady rate.
 		if state.RatePerMin == 0 {
-			if spike := waitForWork(ctx, ctrl); spike.Count > 0 {
-				runSpike(ctx, acts, state, spike)
-			}
+			waitForChange(ctx, ctrl)
 			continue
 		}
 
@@ -134,25 +135,17 @@ func Director(ctx workflow.Context, in Input) error {
 	})
 }
 
-// waitForWork blocks until the operator changes something, returning a spike
-// size if that is what arrived.
+// waitForChange blocks until the operator changes a setting.
 //
-// This is where an idle generator spends all of its time, and it is free:
-// a Workflow waiting on a Selector with nothing scheduled generates no
-// history and no actions.
-func waitForWork(ctx workflow.Context, ctrl *control) SpikeRequest {
-	var spike SpikeRequest
-
+// This is where an idle generator spends all of its time, and it is free: a
+// Workflow waiting on a Selector with nothing scheduled generates no history
+// and no actions.
+func waitForChange(ctx workflow.Context, ctrl *control) {
 	selector := workflow.NewSelector(ctx)
-	selector.AddReceive(ctrl.spikes, func(c workflow.ReceiveChannel, _ bool) {
-		c.Receive(ctx, &spike)
-	})
 	selector.AddReceive(ctrl.changes, func(c workflow.ReceiveChannel, _ bool) {
 		c.Receive(ctx, nil)
 	})
 	selector.Select(ctx)
-
-	return spike
 }
 
 // runWindow starts one window's worth of orders, paced inside the Activity,
@@ -180,7 +173,6 @@ func runWindow(
 	for {
 		var (
 			finished bool
-			spike    SpikeRequest
 			changed  bool
 		)
 
@@ -194,9 +186,6 @@ func runWindow(
 				finished = true
 			})
 		}
-		selector.AddReceive(ctrl.spikes, func(c workflow.ReceiveChannel, _ bool) {
-			c.Receive(ctx, &spike)
-		})
 		selector.AddReceive(ctrl.changes, func(c workflow.ReceiveChannel, _ bool) {
 			c.Receive(ctx, nil)
 			changed = true
@@ -204,10 +193,6 @@ func runWindow(
 		selector.Select(ctx)
 
 		switch {
-		case spike.Count > 0:
-			// Fire it straight away, alongside the paced batch: a spike that
-			// waited for the current window to end would not look like a spike.
-			runSpike(ctx, acts, state, spike)
 		case changed:
 			// The rate or the fault config moved. Abandon the rest of this
 			// window and start a new one from the new settings.
@@ -218,48 +203,6 @@ func runWindow(
 	}
 }
 
-// runSpike dumps a burst of orders as fast as the fanout allows.
-func runSpike(ctx workflow.Context, acts workflow.Context, state *State, spike SpikeRequest) {
-	state.LastSpike = spike.Count
-	state.LastSpikeVersion = spike.Version
-	state.PendingSpike = 0
-
-	// A burst aimed at one version is just a split of 100% to that version,
-	// which reuses the same pinned-override path as a multi-version split.
-	split := state.Split
-	if spike.Version != "" {
-		split = Split{{Version: spike.Version, Pct: 100}}
-	}
-
-	futures := startOrders(acts, state, StartOrdersRequest{
-		Count:    spike.Count,
-		FirstSeq: state.NextSeq,
-		Chaos:    state.Chaos,
-		Split:    split,
-		// No spreading: a spike is the whole point.
-		SpreadOver: 0,
-	})
-	state.NextSeq += spike.Count
-
-	for _, future := range futures {
-		var result StartOrdersResult
-		if err := future.Get(acts, &result); err != nil {
-			workflow.GetLogger(ctx).Warn("spike batch failed", "err", err)
-			continue
-		}
-		state.Started += result.Started
-		if result.Failed > 0 {
-			workflow.GetLogger(ctx).Warn("some orders failed to start",
-				"failed", result.Failed, "detail", result.Detail)
-		}
-	}
-	state.UpdatedAt = workflow.Now(ctx)
-}
-
-// startOrders schedules the Activities for one batch, splitting it when it is
-// larger than one Activity should handle.
-//
-// Sequence numbers are allocated by the caller before anything runs, so order
 // IDs stay unique and deterministic even if a batch is cancelled part way.
 func startOrders(ctx workflow.Context, _ *State, req StartOrdersRequest) []workflow.Future {
 	var futures []workflow.Future
@@ -296,7 +239,6 @@ type control struct {
 	stop   bool
 	maxRun time.Duration
 
-	spikes  workflow.Channel
 	changes workflow.Channel
 }
 
@@ -340,28 +282,6 @@ func register(ctx workflow.Context, state *State, ctrl *control) error {
 		return fmt.Errorf("register %s update: %w", UpdateSetRate, err)
 	}
 
-	// spike dumps a one-off burst on top of the steady rate.
-	if err := workflow.SetUpdateHandlerWithOptions(ctx, UpdateSpike,
-		func(ctx workflow.Context, count int) (State, error) {
-			state.PendingSpike = count
-			state.AutoStopped = false
-			state.StopAt = workflow.Now(ctx).Add(ctrl.maxRun)
-			state.UpdatedAt = workflow.Now(ctx)
-			ctrl.spikes.SendAsync(SpikeRequest{Count: count})
-			return *state, nil
-		},
-		workflow.UpdateHandlerOptions{
-			Validator: func(ctx workflow.Context, count int) error {
-				if count < 1 || count > MaxSpike {
-					return fmt.Errorf("spike must be between 1 and %d orders, got %d", MaxSpike, count)
-				}
-				return nil
-			},
-		},
-	); err != nil {
-		return fmt.Errorf("register %s update: %w", UpdateSpike, err)
-	}
-
 	// setSplit sends new orders to several versions at once. An empty split
 	// hands routing back to the deployment's Current/Ramping config.
 	if err := workflow.SetUpdateHandlerWithOptions(ctx, UpdateSetSplit,
@@ -398,37 +318,6 @@ func register(ctx workflow.Context, state *State, ctrl *control) error {
 		},
 	); err != nil {
 		return fmt.Errorf("register %s update: %w", UpdateSetSplit, err)
-	}
-
-	// spikePinned dumps a burst onto one specific version, whatever the
-	// deployment's routing says. Useful precisely because an idle version has
-	// no workers running: the burst makes Temporal start them from nothing.
-	if err := workflow.SetUpdateHandlerWithOptions(ctx, UpdateSpikePinned,
-		func(ctx workflow.Context, req SpikeRequest) (State, error) {
-			state.PendingSpike = req.Count
-			// Name the target straight away, so the response to this Update
-			// says where the burst is going rather than showing the previous
-			// burst's target until it fires.
-			state.LastSpikeVersion = req.Version
-			state.AutoStopped = false
-			state.StopAt = workflow.Now(ctx).Add(ctrl.maxRun)
-			state.UpdatedAt = workflow.Now(ctx)
-			ctrl.spikes.SendAsync(req)
-			return *state, nil
-		},
-		workflow.UpdateHandlerOptions{
-			Validator: func(ctx workflow.Context, req SpikeRequest) error {
-				if req.Count < 1 || req.Count > MaxSpike {
-					return fmt.Errorf("burst must be between 1 and %d orders, got %d", MaxSpike, req.Count)
-				}
-				if req.Version == "" {
-					return fmt.Errorf("no version given; use %s for an unpinned burst", UpdateSpike)
-				}
-				return nil
-			},
-		},
-	); err != nil {
-		return fmt.Errorf("register %s update: %w", UpdateSpikePinned, err)
 	}
 
 	// setChaos aims the fault injector at a version and step.

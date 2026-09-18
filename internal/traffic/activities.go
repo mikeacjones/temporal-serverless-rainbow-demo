@@ -133,6 +133,9 @@ func (a *Activities) StartOrders(ctx context.Context, req StartOrdersRequest) (S
 			defer func() { <-slots }()
 
 			in := orders.NewOrderInput(seq, sampleChaos(req.Chaos))
+			if req.IDPrefix != "" {
+				in.OrderID = fmt.Sprintf("%s-%06d", req.IDPrefix, seq)
+			}
 			err := a.startOne(ctx, in, builds)
 
 			mu.Lock()

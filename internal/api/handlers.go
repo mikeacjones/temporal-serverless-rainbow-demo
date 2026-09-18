@@ -39,19 +39,37 @@ type spikeRequest struct {
 }
 
 // handleTrafficSpike dumps a one-off burst of orders on top of the steady rate.
+//
+// Queued as Standalone Activities straight from here, not handed to the
+// generator Workflow. See traffic.Burst for why.
 func (s *Server) handleTrafficSpike(w http.ResponseWriter, r *http.Request) {
 	var req spikeRequest
 	if err := decode(r, &req); err != nil {
 		s.writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.queueBurst(w, r, traffic.BurstRequest{Count: req.Count})
+}
 
-	state, err := s.traffic.update(r.Context(), traffic.UpdateSpike, req.Count)
+// queueBurst enqueues a burst and answers as soon as the server owns the work.
+//
+// It does not wait for the Activities to run. They are durable the moment each
+// start returns, so holding the request open would only delay the operator's
+// confirmation of orders that are already on their way.
+func (s *Server) queueBurst(w http.ResponseWriter, r *http.Request, req traffic.BurstRequest) {
+	// A burst is subject to whatever fault is currently aimed, read from the
+	// cached snapshot rather than by querying the generator — a burst that
+	// depends on the Workflow being reachable is the coupling this replaced.
+	if snapshot := s.latest(); snapshot != nil && snapshot.Traffic != nil {
+		req.Chaos = snapshot.Traffic.Chaos
+	}
+
+	result, err := s.bursts.Start(r.Context(), req)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, err)
+		s.writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, state)
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 type splitRequest struct {
@@ -437,13 +455,7 @@ func (s *Server) handleVersionDump(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state, err := s.traffic.update(r.Context(), traffic.UpdateSpikePinned,
-		traffic.SpikeRequest{Count: req.Count, Version: req.Version})
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, state)
+	s.queueBurst(w, r, traffic.BurstRequest{Count: req.Count, Version: req.Version})
 }
 
 type versionRequest struct {

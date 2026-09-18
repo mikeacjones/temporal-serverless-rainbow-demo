@@ -30,12 +30,10 @@ const (
 
 // The control surface.
 const (
-	UpdateSetSplit    = "setSplit"
-	UpdateSpikePinned = "spikePinned"
-	UpdateSetRate     = "setRate"
-	UpdateSpike       = "spike"
-	UpdateSetChaos    = "setChaos"
-	UpdateStop        = "stop"
+	UpdateSetSplit = "setSplit"
+	UpdateSetRate  = "setRate"
+	UpdateSetChaos = "setChaos"
+	UpdateStop     = "stop"
 
 	QueryGetState = "getState"
 )
@@ -43,7 +41,10 @@ const (
 // Limits, generous enough for a demo and low enough to avoid an accident.
 const (
 	MaxRatePerMin = 20000
-	MaxSpike      = 20000
+	// MaxBurst bounds a single burst. Validated by the client that queues it
+	// now that a burst is a Standalone Activity rather than a Workflow Update,
+	// so the operator is told before anything is enqueued.
+	MaxBurst = 20000
 )
 
 // ChaosConfig is the live fault-injection setting.
@@ -136,13 +137,8 @@ type State struct {
 	// Started is the cumulative number of orders this generator has started.
 	Started int `json:"started"`
 	// NextSeq is the next order number to be used.
-	NextSeq int `json:"nextSeq"`
-	// PendingSpike is a burst that has been requested but not yet fired.
-	PendingSpike int `json:"pendingSpike"`
-	LastSpike    int `json:"lastSpike"`
-	// LastSpikeVersion names the version the last burst was pinned to, if any.
-	LastSpikeVersion string    `json:"lastSpikeVersion,omitempty"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	NextSeq   int       `json:"nextSeq"`
+	UpdatedAt time.Time `json:"updatedAt"`
 
 	// Split is the active multi-version split, if any.
 	Split Split `json:"split,omitempty"`
@@ -152,18 +148,6 @@ type State struct {
 	// AutoStopped records that the deadline is why the rate is zero, so the
 	// dashboard can say so rather than looking as though someone stopped it.
 	AutoStopped bool `json:"autoStopped"`
-}
-
-// SpikeRequest dumps a burst of orders.
-type SpikeRequest struct {
-	Count int `json:"count"`
-	// Version pins every order in the burst to one version, bypassing
-	// deployment routing. Empty lets routing decide, as a normal spike does.
-	//
-	// Pinning a burst is the quickest way to show a specific version's workers
-	// come to life: an idle version has no Lambdas running at all, so dumping
-	// orders on it makes Temporal start them from nothing while you watch.
-	Version string `json:"version,omitempty"`
 }
 
 // StartOrdersRequest asks the Activity to start a batch of orders.
@@ -184,6 +168,16 @@ type StartOrdersRequest struct {
 	// Split, when set, assigns each order a version and starts it pinned to
 	// that version instead of letting deployment routing decide.
 	Split Split `json:"split,omitempty"`
+
+	// IDPrefix names the batch that owns these orders, replacing the default
+	// "ord" prefix.
+	//
+	// The steady stream and a burst allocate order IDs independently — that
+	// independence is the whole reason a burst can be started without the
+	// generator Workflow — so they cannot share one counter. A per-burst
+	// prefix keeps the IDs from colliding, and makes a burst's orders
+	// findable on their own with WorkflowId STARTS_WITH.
+	IDPrefix string `json:"idPrefix,omitempty"`
 }
 
 // StartOrdersResult reports how a batch went. Failures are counted rather than

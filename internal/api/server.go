@@ -22,6 +22,7 @@ import (
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/metrics"
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/orders"
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/rollout"
+	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/traffic"
 )
 
 // Options configure the backend.
@@ -64,6 +65,7 @@ type Server struct {
 
 	traffic  *trafficController
 	rollouts *rolloutController
+	bursts   *traffic.Burst
 
 	// lastReconcile throttles the fault repair, and lastHistory paces the
 	// sparkline samples. Touched only by the poll goroutine, so neither needs
@@ -112,6 +114,7 @@ func New(opts Options) *Server {
 		hub:           newHub(),
 		traffic:       &trafficController{c: opts.Client, logger: opts.Logger, maxRun: opts.TrafficMaxRun},
 		rollouts:      &rolloutController{c: opts.Client, taskQueue: opts.ControlQueue, logger: opts.Logger},
+		bursts:        traffic.NewBurst(opts.Client, opts.ControlQueue, opts.Logger),
 		allowedOrigin: opts.AllowedOrigin,
 		orderSample:   opts.OrderSample,
 		history:       &History{},

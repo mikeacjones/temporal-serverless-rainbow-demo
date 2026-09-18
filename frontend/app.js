@@ -776,7 +776,8 @@ function dumpControl(label) {
 
   const send = button(`Send to ${label}`, '', () =>
     act('/api/versions/dump', { version: label, count: Number(count.value) },
-      () => `Sent ${int(count.value)} orders straight to ${label}`));
+      (r) => `Queued ${int(count.value)} orders for ${label} — ` +
+        `${r.batches} standalone ${r.batches === 1 ? 'activity' : 'activities'}`));
   send.title = `Start orders pinned to ${label}, ignoring the routing split`;
 
   row.append(count, send);
@@ -961,16 +962,17 @@ function drawColumns(s, orders, filter) {
     retired.delete(id);
   }
 
-  // Group by version, oldest first. Order IDs are zero-padded and monotonic
-  // with start time, so sorting on them is stable — unlike age, which is whole
-  // seconds and leaves dozens of orders tied and reshuffling every frame.
+  // Group by version, oldest first, keyed on the start time the server
+  // reported. Nanosecond precision, so no two orders tie and the order never
+  // churns between frames — unlike age, which is whole seconds, or the order
+  // ID, which bursts now allocate independently of the steady stream.
   const byVersion = new Map(versions.map((v) => [v, []]));
   for (const order of held.values()) {
     const bucket = byVersion.get(order.version);
     if (bucket) bucket.push(order);
   }
   for (const bucket of byVersion.values()) {
-    bucket.sort((a, b) => (a.orderId < b.orderId ? -1 : 1));
+    bucket.sort((a, b) => startedAt(a) - startedAt(b) || (a.orderId < b.orderId ? -1 : 1));
   }
 
   // Columns are reused across frames, so a stack is never rebuilt underneath
@@ -1068,6 +1070,15 @@ function depart(label) {
   }, ms);
 }
 
+// startedAt is an order's start time as a number, for sorting.
+//
+// Falls back to the order ID when the timestamp is missing, so a snapshot from
+// an older backend still stacks in a stable order rather than at random.
+function startedAt(order) {
+  const at = Date.parse(order.startedAt || '');
+  return Number.isNaN(at) ? 0 : at;
+}
+
 // column returns one version's column, building it on first use.
 function column(label) {
   let parts = columnNodes.get(label);
@@ -1090,6 +1101,15 @@ function column(label) {
   return parts;
 }
 
+// orderNumber shortens an order ID for display.
+//
+// Steady orders are "ord-000123" and burst orders "burst-<millis>-7", so the
+// prefix and any padding go and the trailing number stays.
+function orderNumber(id) {
+  const tail = String(id).split('-').pop();
+  return '#' + tail.replace(/^0+(?=\d)/, '');
+}
+
 // otick builds one compact ticket for a column.
 function otick(order, pipelines) {
   const node = el('div', { class: 'otick otick-arriving' });
@@ -1097,7 +1117,7 @@ function otick(order, pipelines) {
 
   const idRow = el('div', { class: 'otick-row' });
   idRow.append(
-    el('span', { class: 'otick-id', text: order.orderId.replace(/^ord-0*/, '#') }),
+    el('span', { class: 'otick-id', text: orderNumber(order.orderId) }),
     el('span', { class: 'otick-age' }),
   );
 
@@ -1250,7 +1270,9 @@ for (const chip of document.querySelectorAll('.chip[data-rate]')) {
 for (const chip of document.querySelectorAll('.chip[data-spike]')) {
   chip.addEventListener('click', () => {
     const count = Number(chip.dataset.spike);
-    act('/api/traffic/spike', { count }, () => `Dumped ${int(count)} orders`);
+    act('/api/traffic/spike', { count },
+      (r) => `Queued ${int(count)} orders — ` +
+        `${r.batches} standalone ${r.batches === 1 ? 'activity' : 'activities'}`);
   });
 }
 

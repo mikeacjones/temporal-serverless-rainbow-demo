@@ -26,6 +26,17 @@ type LiveOrder struct {
 	Degraded   bool   `json:"degraded"`
 	ElapsedSec int    `json:"elapsedSec"`
 
+	// StartedAt is when the order was started, to the nanosecond.
+	//
+	// The dashboard stacks each version's orders oldest-first and needs a
+	// stable key to do it. ElapsedSec cannot be that key — it is whole
+	// seconds, so dozens of orders tie and the tie-break churns as the sample
+	// slides. The order ID cannot be it either, now that bursts allocate IDs
+	// independently of the steady stream: two callers cannot share a counter
+	// without coordinating, and coordinating is what starting a burst as a
+	// Standalone Activity is meant to avoid.
+	StartedAt time.Time `json:"startedAt"`
+
 	// Done reports that the order is closed, for any reason.
 	//
 	// Deliberately not the same question as Status == "Completed". An order
@@ -127,12 +138,13 @@ func liveOrder(e *workflowpb.WorkflowExecutionInfo, now time.Time) LiveOrder {
 	fields := e.GetSearchAttributes().GetIndexedFields()
 
 	order := LiveOrder{
-		OrderID:  e.GetExecution().GetWorkflowId(),
-		Version:  keyword(fields["OrderVersion"]),
-		Step:     keyword(fields["OrderStep"]),
-		Status:   statusName(e.GetStatus().String()),
-		Degraded: keyword(fields["OrderHealth"]) == orders.HealthDegraded,
-		Done:     e.GetStatus() != enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+		OrderID:   e.GetExecution().GetWorkflowId(),
+		StartedAt: e.GetStartTime().AsTime(),
+		Version:   keyword(fields["OrderVersion"]),
+		Step:      keyword(fields["OrderStep"]),
+		Status:    statusName(e.GetStatus().String()),
+		Degraded:  keyword(fields["OrderHealth"]) == orders.HealthDegraded,
+		Done:      e.GetStatus() != enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
 	}
 
 	if start := e.GetStartTime().AsTime(); !start.IsZero() {
