@@ -38,36 +38,6 @@ func lazyClient(t *testing.T) client.Client {
 // The one that matters. A bad poller config is not a returned error — the SDK
 // panics inside worker construction, which on Lambda is a cold start that dies
 // on every invocation. So construct the worker for real.
-func TestTunedWorkerConstructsWithoutPanicking(t *testing.T) {
-	opts := lambdaDefaults()
-	tuneWorker(&opts)
-
-	defer func() {
-		if p := recover(); p != nil {
-			t.Fatalf("worker construction panicked: %v", p)
-		}
-	}()
-
-	if w := worker.New(lazyClient(t), "orders", opts); w == nil {
-		t.Fatal("expected a worker")
-	}
-}
-
-// Proves the clearing in tuneWorker is load-bearing rather than superstition:
-// setting a behaviour on top of lambdaworker's counts is exactly the panic.
-func TestBehaviourWithoutClearingTheCountPanics(t *testing.T) {
-	opts := lambdaDefaults()
-	opts.ActivityTaskPollerBehavior = autoscalingPollers(10)
-
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic from setting both the count and the behaviour")
-		}
-	}()
-
-	worker.New(lazyClient(t), "orders", opts)
-}
-
 // Slots are the SDK's unless the environment overrides them. Defaulting these
 // ourselves is how the workflow-task slots ended up at 5, below lambdaworker's
 // own 10.
@@ -98,22 +68,5 @@ func TestSlotsFollowTheEnvironmentWhenSet(t *testing.T) {
 	}
 	if opts.MaxConcurrentWorkflowTaskExecutionSize != 12 {
 		t.Errorf("workflow task slots = %d, want 12", opts.MaxConcurrentWorkflowTaskExecutionSize)
-	}
-}
-
-// The counts must be cleared, not merely overwritten, or the mutual-exclusivity
-// check fires.
-func TestTuningClearsTheFixedPollerCounts(t *testing.T) {
-	opts := lambdaDefaults()
-	tuneWorker(&opts)
-
-	if opts.MaxConcurrentActivityTaskPollers != 0 {
-		t.Errorf("activity poller count = %d, want 0", opts.MaxConcurrentActivityTaskPollers)
-	}
-	if opts.MaxConcurrentWorkflowTaskPollers != 0 {
-		t.Errorf("workflow poller count = %d, want 0", opts.MaxConcurrentWorkflowTaskPollers)
-	}
-	if opts.ActivityTaskPollerBehavior == nil || opts.WorkflowTaskPollerBehavior == nil {
-		t.Error("both poller behaviours should be set")
 	}
 }

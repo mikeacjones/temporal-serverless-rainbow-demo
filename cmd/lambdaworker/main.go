@@ -17,6 +17,7 @@ import (
 	"go.temporal.io/sdk/contrib/aws/lambdaworker"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/awssecret"
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/config"
 	"github.com/temporal-sa/temporal-serverless-rainbow-demo/internal/orders"
 )
@@ -32,7 +33,7 @@ func main() {
 	}
 
 	// Fetch the Temporal credential before the worker tries to connect.
-	if err := resolveAPIKey(context.Background()); err != nil {
+	if err := awssecret.ResolveTemporalAPIKey(context.Background()); err != nil {
 		log.Fatalf("cannot resolve the Temporal API key: %v", err)
 	}
 

@@ -178,6 +178,11 @@ lambda-build:
 lambda-deploy:
 	./deploy/aws/deploy.sh
 
+## lambda-control-deploy: run the control plane on Lambda, as its own deployment
+.PHONY: lambda-control-deploy
+lambda-control-deploy:
+	./deploy/aws/deploy-control.sh
+
 ## lambda-teardown: delete the Lambdas and their IAM roles (add ALL=1 for versions)
 .PHONY: lambda-teardown
 lambda-teardown:
